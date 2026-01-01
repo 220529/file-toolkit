@@ -103,6 +103,6 @@ jobs:
             | macOS Apple Silicon | `File.Toolkit_x.x.x_aarch64.dmg` |
             | Windows | `File.Toolkit_x.x.x_x64-setup.exe` |
             | Linux (Debian/Ubuntu) | `File.Toolkit_x.x.x_amd64.deb` |
-          releaseDraft: true
+          releaseDraft: false
           prerelease: false
           args: --target ${{ matrix.target }} --bundles ${{ matrix.platform == 'macos-latest' && 'dmg' || matrix.platform == 'windows-latest' && 'nsis' || 'deb' }}
