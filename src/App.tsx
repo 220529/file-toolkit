@@ -2,9 +2,10 @@ import { useState } from "react";
 import FileStats from "./pages/FileStats";
 import Dedup from "./pages/Dedup";
 import VideoCut from "./pages/VideoCut";
+import VideoConvert from "./pages/VideoConvert";
 import "./index.css";
 
-type Tab = "stats" | "dedup" | "video-cut" | "video-upscale";
+type Tab = "stats" | "dedup" | "video-cut" | "video-convert";
 
 function App() {
   const [activeTab, setActiveTab] = useState<Tab>("stats");
@@ -23,7 +24,7 @@ function App() {
     { key: "stats", label: "文件统计", icon: "📊" },
     { key: "dedup", label: "文件去重", icon: "🔍" },
     { key: "video-cut", label: "视频截取", icon: "✂️" },
-    { key: "video-upscale", label: "视频超分", icon: "✨" },
+    { key: "video-convert", label: "格式转换", icon: "🔄" },
   ];
 
   return (
@@ -122,14 +123,8 @@ function App() {
           <div className={activeTab === "video-cut" ? "" : "hidden"}>
             <VideoCut key={`video-${resetKey}`} active={activeTab === "video-cut"} />
           </div>
-          <div className={activeTab === "video-upscale" ? "" : "hidden"}>
-            <div className="p-6">
-              <div className="card p-12 text-center">
-                <div className="text-6xl mb-4">🚧</div>
-                <div className="text-lg text-gray-500 mb-2">视频超分功能开发中</div>
-                <div className="text-sm text-gray-400">AI 还原视频清晰度</div>
-              </div>
-            </div>
+          <div className={activeTab === "video-convert" ? "" : "hidden"}>
+            <VideoConvert key={`convert-${resetKey}`} active={activeTab === "video-convert"} />
           </div>
         </div>
       </div>

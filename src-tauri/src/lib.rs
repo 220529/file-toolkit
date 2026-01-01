@@ -1,5 +1,6 @@
 mod commands;
 
+use commands::convert::{cancel_convert, convert_video};
 use commands::dedup::{cancel_dedup, delete_files, find_duplicates, get_file_thumbnail};
 use commands::file_stats::scan_directory;
 use commands::video::{
@@ -30,6 +31,8 @@ pub fn run() {
             generate_preview_frame,
             generate_timeline_frames,
             cancel_video_cut,
+            convert_video,
+            cancel_convert,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
