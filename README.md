@@ -29,7 +29,7 @@
 
 ### 方式一：直接下载（推荐）
 
-前往 [Releases](https://github.com/yourname/file-toolkit/releases) 下载对应平台的安装包：
+前往 [Releases](https://github.com/220529/file-toolkit/releases) 下载对应平台的安装包：
 
 | 平台 | 文件 |
 |------|------|
@@ -59,7 +59,7 @@
 ### 1. 克隆项目
 
 ```bash
-git clone https://github.com/yourname/file-toolkit.git
+git clone https://github.com/220529/file-toolkit.git
 cd file-toolkit
 ```
 
