@@ -260,13 +260,14 @@ pub fn cancel_dedup() {
 /// 图片：直接读取并缩放
 /// 视频：使用 FFmpeg 截取第一帧
 #[tauri::command]
-pub fn get_file_thumbnail(path: String) -> Result<String, String> {
-    use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
+pub fn get_file_thumbnail(app: tauri::AppHandle, path: String) -> Result<String, String> {
+    use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
     use std::process::Command;
-    
+    use tauri::Manager;
+
     let path_lower = path.to_lowercase();
     let ext = path_lower.rsplit('.').next().unwrap_or("");
-    
+
     // 图片类型
     if ["jpg", "jpeg", "png", "gif", "bmp", "webp"].contains(&ext) {
         let data = fs::read(&path).map_err(|e| e.to_string())?;
@@ -278,33 +279,47 @@ pub fn get_file_thumbnail(path: String) -> Result<String, String> {
         };
         return Ok(format!("data:{};base64,{}", mime, BASE64.encode(&data)));
     }
-    
+
     // 视频类型：用 FFmpeg 截取第一帧
     if ["mp4", "mov", "avi", "mkv", "wmv", "flv", "webm"].contains(&ext) {
+        // 获取内嵌的 ffmpeg 路径
+        let ffmpeg = app
+            .path()
+            .resource_dir()
+            .ok()
+            .map(|p| p.join("binaries").join("ffmpeg"))
+            .filter(|p| p.exists())
+            .unwrap_or_else(|| std::path::PathBuf::from("ffmpeg"));
+
         let temp_dir = std::env::temp_dir();
         let temp_file = temp_dir.join(format!("thumb_{}.jpg", std::process::id()));
         let temp_path = temp_file.to_string_lossy().to_string();
-        
-        let output = Command::new("ffmpeg")
+
+        let output = Command::new(&ffmpeg)
             .args([
                 "-y",
-                "-ss", "0",
-                "-i", &path,
-                "-vframes", "1",
-                "-vf", "scale=120:-1",  // 缩放到宽度 120px
-                "-q:v", "5",
+                "-ss",
+                "0",
+                "-i",
+                &path,
+                "-vframes",
+                "1",
+                "-vf",
+                "scale=120:-1",
+                "-q:v",
+                "5",
                 &temp_path,
             ])
             .output()
             .map_err(|e| format!("执行 ffmpeg 失败: {}", e))?;
-        
+
         if output.status.success() {
             let data = fs::read(&temp_file).map_err(|e| e.to_string())?;
             let _ = fs::remove_file(&temp_file);
             return Ok(format!("data:image/jpeg;base64,{}", BASE64.encode(&data)));
         }
     }
-    
+
     // 其他类型返回空
     Err("不支持的文件类型".into())
 }

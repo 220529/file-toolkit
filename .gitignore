@@ -22,3 +22,14 @@ dist-ssr
 *.njsproj
 *.sln
 *.sw?
+
+# Rust / Tauri
+src-tauri/target/
+
+# FFmpeg binaries (too large, ~160MB)
+src-tauri/binaries/
+
+# Build outputs
+*.dmg
+*.app
+*.zip
