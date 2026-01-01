@@ -50,21 +50,14 @@ pub async fn convert_video(
     let output_clone = output.clone();
     let output_for_cleanup = output.clone();
     let cancelled = CONVERT_CANCELLED.clone();
+    let format = format.clone();
 
-    // 根据目标格式选择编码参数
-    let (video_codec, audio_codec) = match format.as_str() {
-        "mp4" => ("libx264", "aac"),
-        "mov" => ("libx264", "aac"),
-        "gif" => ("gif", ""),
-        _ => ("libx264", "aac"),
-    };
-
-    // 根据画质选择 CRF 值
+    // 根据画质选择 CRF 值（越小质量越高）
     let crf = match quality.as_str() {
-        "high" => "15",      // 高画质
-        "medium" => "20",    // 中等
-        "low" => "28",       // 低画质（小文件）
-        _ => "18",
+        "high" => "18",
+        "medium" => "23",
+        "low" => "28",
+        _ => "20",
     };
 
     let result = tokio::task::spawn_blocking(move || {
@@ -72,27 +65,26 @@ pub async fn convert_video(
             "-y".to_string(),
             "-i".to_string(),
             input.clone(),
-            "-c:v".to_string(),
-            video_codec.to_string(),
+            "-threads".to_string(), "0".to_string(),
         ];
 
-        // 视频编码参数
-        if video_codec == "libx264" {
-            args.extend(["-crf".to_string(), crf.to_string()]);
-            args.extend(["-preset".to_string(), "slow".to_string()]);
-            args.extend(["-pix_fmt".to_string(), "yuv420p".to_string()]);
-        } else if video_codec == "gif" {
-            args.extend(["-vf".to_string(), "fps=15,scale=640:-1:flags=lanczos".to_string()]);
-        }
-
-        // 音频编码
-        if !audio_codec.is_empty() {
-            args.extend(["-c:a".to_string(), audio_codec.to_string()]);
-            if audio_codec == "aac" {
-                args.extend(["-b:a".to_string(), "128k".to_string()]);
-            }
+        if format == "gif" {
+            // GIF：限制帧率和尺寸
+            args.extend([
+                "-vf".to_string(), "fps=12,scale='min(480,iw)':-1:flags=lanczos".to_string(),
+                "-c:v".to_string(), "gif".to_string(),
+                "-an".to_string(),
+            ]);
         } else {
-            args.push("-an".to_string());
+            // MP4/MOV：使用 libx264 软编码（兼容性最好）
+            args.extend([
+                "-c:v".to_string(), "libx264".to_string(),
+                "-crf".to_string(), crf.to_string(),
+                "-preset".to_string(), "fast".to_string(),
+                "-pix_fmt".to_string(), "yuv420p".to_string(),
+                "-c:a".to_string(), "aac".to_string(),
+                "-b:a".to_string(), "192k".to_string(),
+            ]);
         }
 
         args.extend(["-progress".to_string(), "pipe:1".to_string()]);
@@ -175,4 +167,13 @@ fn parse_ffmpeg_time(time_str: &str) -> Option<f64> {
     } else {
         None
     }
+}
+
+
+/// 获取文件大小
+#[tauri::command]
+pub fn get_file_size(path: String) -> Result<u64, String> {
+    std::fs::metadata(&path)
+        .map(|m| m.len())
+        .map_err(|e| format!("获取文件大小失败: {}", e))
 }

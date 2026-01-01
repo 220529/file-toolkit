@@ -16,11 +16,23 @@ interface FileItem {
   path: string;
   name: string;
   sourceFormat: string;
+  size: number; // 原文件大小（字节）
   status: FileStatus;
   progress: number;
   error?: string;
   outputPath?: string;
+  outputSize?: number; // 输出文件大小（字节）
+  duration?: number; // 耗时（秒）
+  startTime?: number; // 开始时间戳
 }
+
+// 格式化文件大小
+const formatSize = (bytes: number): string => {
+  if (bytes < 1024) return `${bytes} B`;
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
+  if (bytes < 1024 * 1024 * 1024) return `${(bytes / 1024 / 1024).toFixed(1)} MB`;
+  return `${(bytes / 1024 / 1024 / 1024).toFixed(2)} GB`;
+};
 
 const FORMATS: { value: Format; label: string }[] = [
   { value: "mp4", label: "MP4" },
@@ -70,21 +82,32 @@ export default function VideoConvert({ active }: Props) {
     };
   }, [active, files]);
 
-  const addFiles = (paths: string[]) => {
+  const addFiles = async (paths: string[]) => {
     const videoExts = ["mov", "mp4", "avi", "mkv", "webm", "flv", "wmv"];
-    const newFiles: FileItem[] = paths
-      .filter(p => {
-        const ext = p.split(".").pop()?.toLowerCase() || "";
-        return videoExts.includes(ext) && !files.some(f => f.path === p);
-      })
-      .map(p => ({
-        id: Math.random().toString(36).slice(2),
-        path: p,
-        name: p.split("/").pop() || p.split("\\").pop() || "",
-        sourceFormat: p.split(".").pop()?.toLowerCase() || "",
-        status: "pending" as FileStatus,
-        progress: 0,
-      }));
+    const newPaths = paths.filter(p => {
+      const ext = p.split(".").pop()?.toLowerCase() || "";
+      return videoExts.includes(ext) && !files.some(f => f.path === p);
+    });
+    
+    // 获取文件大小
+    const newFiles: FileItem[] = [];
+    for (const p of newPaths) {
+      try {
+        const size = await invoke<number>("get_file_size", { path: p });
+        newFiles.push({
+          id: Math.random().toString(36).slice(2),
+          path: p,
+          name: p.split("/").pop() || p.split("\\").pop() || "",
+          sourceFormat: p.split(".").pop()?.toLowerCase() || "",
+          size,
+          status: "pending" as FileStatus,
+          progress: 0,
+        });
+      } catch {
+        // 忽略无法读取的文件
+      }
+    }
+    
     if (newFiles.length > 0) {
       setFiles(prev => [...prev, ...newFiles]);
     }
@@ -116,7 +139,7 @@ export default function VideoConvert({ active }: Props) {
       
       setCurrentIndex(i);
       setFiles(prev => prev.map((f, idx) => 
-        idx === i ? { ...f, status: "converting", progress: 0 } : f
+        idx === i ? { ...f, status: "converting", progress: 0, startTime: Date.now() } : f
       ));
 
       const file = files[i];
@@ -131,13 +154,22 @@ export default function VideoConvert({ active }: Props) {
           format: targetFormat,
           quality: quality,
         });
-        setFiles(prev => prev.map((f, idx) => 
-          idx === i ? { ...f, status: "done", progress: 100, outputPath } : f
-        ));
+        // 获取输出文件大小
+        let outputSize = 0;
+        try {
+          outputSize = await invoke<number>("get_file_size", { path: outputPath });
+        } catch {}
+        setFiles(prev => prev.map((f, idx) => {
+          if (idx !== i) return f;
+          const duration = f.startTime ? Math.round((Date.now() - f.startTime) / 1000) : 0;
+          return { ...f, status: "done", progress: 100, outputPath, outputSize, duration };
+        }));
       } catch (e) {
-        setFiles(prev => prev.map((f, idx) => 
-          idx === i ? { ...f, status: "error", error: String(e) } : f
-        ));
+        setFiles(prev => prev.map((f, idx) => {
+          if (idx !== i) return f;
+          const duration = f.startTime ? Math.round((Date.now() - f.startTime) / 1000) : 0;
+          return { ...f, status: "error", error: String(e), duration };
+        }));
       }
     }
 
@@ -209,9 +241,20 @@ export default function VideoConvert({ active }: Props) {
                   </div>
                   <div className="flex-1 min-w-0">
                     <div className="text-sm truncate">{file.name}</div>
+                    <div className="text-xs text-gray-400 mt-0.5">
+                      {formatSize(file.size)}
+                      {file.status === "done" && file.outputSize !== undefined && (
+                        <span className="ml-2">→ {formatSize(file.outputSize)}</span>
+                      )}
+                    </div>
                     {file.status === "converting" && (
                       <div className="mt-1.5 h-1.5 bg-blue-100 rounded-full overflow-hidden">
                         <div className="h-full bg-blue-500 rounded-full transition-all" style={{ width: `${file.progress}%` }} />
+                      </div>
+                    )}
+                    {file.status === "done" && file.outputPath && (
+                      <div className="text-xs text-gray-400 mt-0.5 truncate" title={file.outputPath}>
+                        {file.outputPath.split("/").pop()}
                       </div>
                     )}
                     {file.status === "error" && (
@@ -221,7 +264,11 @@ export default function VideoConvert({ active }: Props) {
                   <div className="flex items-center gap-2 flex-shrink-0">
                     {file.status === "pending" && <span className="text-xs text-gray-400">等待中</span>}
                     {file.status === "converting" && <span className="text-xs text-blue-500 font-medium">{file.progress}%</span>}
-                    {file.status === "done" && <span className="text-xs text-green-600">✓ 完成</span>}
+                    {file.status === "done" && (
+                      <span className="text-xs text-green-600">
+                        ✓ {file.duration}s
+                      </span>
+                    )}
                     {file.status === "error" && <span className="text-xs text-red-500">失败</span>}
                     {!converting && file.status !== "converting" && (
                       <button onClick={() => removeFile(file.id)} className="w-6 h-6 rounded hover:bg-gray-200 flex items-center justify-center text-gray-400 hover:text-gray-600">×</button>

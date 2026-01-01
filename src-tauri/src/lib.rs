@@ -1,6 +1,6 @@
 mod commands;
 
-use commands::convert::{cancel_convert, convert_video};
+use commands::convert::{cancel_convert, convert_video, get_file_size};
 use commands::dedup::{cancel_dedup, delete_files, find_duplicates, get_file_thumbnail};
 use commands::file_stats::scan_directory;
 use commands::video::{
@@ -37,6 +37,7 @@ pub fn run() {
             get_image_info,
             remove_watermark,
             batch_remove_watermark,
+            get_file_size,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

@@ -1,4 +1,5 @@
-import { useState } from "react";
+import { useState, useEffect } from "react";
+import { getVersion } from "@tauri-apps/api/app";
 import FileStats from "./pages/FileStats";
 import Dedup from "./pages/Dedup";
 import VideoCut from "./pages/VideoCut";
@@ -14,6 +15,11 @@ function App() {
   const [showAbout, setShowAbout] = useState(false);
   const [showResetConfirm, setShowResetConfirm] = useState(false);
   const [resetKey, setResetKey] = useState(0);
+  const [version, setVersion] = useState("0.0.0");
+
+  useEffect(() => {
+    getVersion().then(setVersion).catch(() => {});
+  }, []);
 
   const handleReset = () => {
     setResetKey((k) => k + 1);
@@ -187,7 +193,7 @@ function App() {
             <div className="p-4 space-y-2 text-xs">
               <div className="flex justify-between">
                 <span className="text-gray-500">版本</span>
-                <span className="font-mono">v0.1.0</span>
+                <span className="font-mono">v{version}</span>
               </div>
               <div className="flex justify-between">
                 <span className="text-gray-500">技术栈</span>
