@@ -1,0 +1,101 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: macos-latest
+            target: x86_64-apple-darwin
+          - platform: macos-latest
+            target: aarch64-apple-darwin
+          - platform: windows-latest
+            target: x86_64-pc-windows-msvc
+          - platform: ubuntu-22.04
+            target: x86_64-unknown-linux-gnu
+
+    runs-on: ${{ matrix.platform }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: Install pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 9
+
+      - name: Install Rust
+        uses: dtolnay/rust-action@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Install dependencies (Ubuntu)
+        if: matrix.platform == 'ubuntu-22.04'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf
+
+      - name: Install frontend dependencies
+        run: pnpm install
+
+      # 下载 FFmpeg
+      - name: Download FFmpeg (macOS)
+        if: matrix.platform == 'macos-latest'
+        run: |
+          mkdir -p src-tauri/binaries
+          curl -L "https://evermeet.cx/ffmpeg/getrelease/ffmpeg/zip" -o /tmp/ffmpeg.zip
+          curl -L "https://evermeet.cx/ffmpeg/getrelease/ffprobe/zip" -o /tmp/ffprobe.zip
+          unzip -o /tmp/ffmpeg.zip -d src-tauri/binaries/
+          unzip -o /tmp/ffprobe.zip -d src-tauri/binaries/
+          mv src-tauri/binaries/ffmpeg src-tauri/binaries/ffmpeg-${{ matrix.target }}
+          mv src-tauri/binaries/ffprobe src-tauri/binaries/ffprobe-${{ matrix.target }}
+          chmod +x src-tauri/binaries/*
+
+      - name: Download FFmpeg (Windows)
+        if: matrix.platform == 'windows-latest'
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path src-tauri/binaries
+          Invoke-WebRequest -Uri "https://www.gyan.dev/ffmpeg/builds/ffmpeg-release-essentials.zip" -OutFile "$env:TEMP\ffmpeg.zip"
+          Expand-Archive -Path "$env:TEMP\ffmpeg.zip" -DestinationPath "$env:TEMP\ffmpeg" -Force
+          $ffmpegDir = Get-ChildItem -Path "$env:TEMP\ffmpeg" -Directory | Select-Object -First 1
+          Copy-Item "$($ffmpegDir.FullName)\bin\ffmpeg.exe" "src-tauri/binaries/ffmpeg-${{ matrix.target }}.exe"
+          Copy-Item "$($ffmpegDir.FullName)\bin\ffprobe.exe" "src-tauri/binaries/ffprobe-${{ matrix.target }}.exe"
+
+      - name: Download FFmpeg (Linux)
+        if: matrix.platform == 'ubuntu-22.04'
+        run: |
+          mkdir -p src-tauri/binaries
+          curl -L "https://johnvansickle.com/ffmpeg/releases/ffmpeg-release-amd64-static.tar.xz" -o /tmp/ffmpeg.tar.xz
+          tar -xf /tmp/ffmpeg.tar.xz -C /tmp/
+          cp /tmp/ffmpeg-*-amd64-static/ffmpeg src-tauri/binaries/ffmpeg-${{ matrix.target }}
+          cp /tmp/ffmpeg-*-amd64-static/ffprobe src-tauri/binaries/ffprobe-${{ matrix.target }}
+          chmod +x src-tauri/binaries/*
+
+      - name: Build Tauri
+        uses: tauri-apps/tauri-action@v0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          tagName: ${{ github.ref_name }}
+          releaseName: 'File Toolkit ${{ github.ref_name }}'
+          releaseBody: |
+            ## 下载
+            - **macOS Intel**: `File Toolkit_x.x.x_x64.dmg`
+            - **macOS Apple Silicon**: `File Toolkit_x.x.x_aarch64.dmg`
+            - **Windows**: `File Toolkit_x.x.x_x64-setup.exe`
+            - **Linux**: `file-toolkit_x.x.x_amd64.deb`
+          releaseDraft: true
+          prerelease: false
+          args: --target ${{ matrix.target }}
