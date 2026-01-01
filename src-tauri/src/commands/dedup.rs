@@ -234,11 +234,17 @@ pub async fn find_duplicates(app: AppHandle, path: String) -> Result<DedupResult
 
 /// 删除指定文件
 #[tauri::command]
-pub fn delete_files(paths: Vec<String>) -> Result<u32, String> {
-    info!("[删除] 准备删除 {} 个文件", paths.len());
+pub fn delete_files(paths: Vec<String>, use_trash: bool) -> Result<u32, String> {
+    info!("[删除] 准备删除 {} 个文件, 使用回收站: {}", paths.len(), use_trash);
     let mut deleted = 0;
     for path in &paths {
-        if fs::remove_file(path).is_ok() {
+        let result = if use_trash {
+            trash::delete(path)
+        } else {
+            fs::remove_file(path).map_err(|e| trash::Error::Unknown { description: e.to_string() })
+        };
+        
+        if result.is_ok() {
             debug!("[删除] 已删除: {}", path);
             deleted += 1;
         } else {

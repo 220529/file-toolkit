@@ -41,6 +41,7 @@ export default function Dedup({ active = true }: { active?: boolean }) {
   const [thumbnails, setThumbnails] = useState<Map<string, string>>(new Map());
   const [groupThumbnails, setGroupThumbnails] = useState<Map<string, string>>(new Map());
   const [previewImage, setPreviewImage] = useState<string | null>(null);
+  const [useTrash, setUseTrash] = useState(true);
 
   // 监听进度事件
   useEffect(() => {
@@ -145,8 +146,9 @@ export default function Dedup({ active = true }: { active?: boolean }) {
   async function deleteSelected() {
     if (selected.size === 0) return;
 
+    const action = useTrash ? "移到回收站" : "永久删除";
     const confirmed = await confirm(
-      `确定要删除选中的 ${selected.size} 个文件吗？\n此操作不可恢复！`,
+      `确定要${action}选中的 ${selected.size} 个文件吗？${useTrash ? "" : "\n此操作不可恢复！"}`,
       { title: "确认删除", kind: "warning" }
     );
 
@@ -154,8 +156,9 @@ export default function Dedup({ active = true }: { active?: boolean }) {
       try {
         const deleted = await invoke<number>("delete_files", {
           paths: Array.from(selected),
+          useTrash,
         });
-        alert(`成功删除 ${deleted} 个文件`);
+        alert(`成功${useTrash ? "移到回收站" : "删除"} ${deleted} 个文件`);
         if (selectedPath) {
           const res = await invoke<DedupResult>("find_duplicates", { path: selectedPath });
           setResult(res);
@@ -219,6 +222,15 @@ export default function Dedup({ active = true }: { active?: boolean }) {
               <button onClick={autoSelect} className="btn btn-default">
                 🔄 智能选择
               </button>
+              <label className="flex items-center gap-2 text-sm text-gray-600 cursor-pointer">
+                <input
+                  type="checkbox"
+                  checked={useTrash}
+                  onChange={(e) => setUseTrash(e.target.checked)}
+                  className="w-4 h-4 rounded"
+                />
+                移到回收站
+              </label>
               <button
                 onClick={deleteSelected}
                 disabled={selected.size === 0}
