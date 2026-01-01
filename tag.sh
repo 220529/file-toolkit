@@ -55,7 +55,7 @@ git commit -m "chore: bump version to $NEW_VERSION"
 
 # 创建并推送
 git tag "$NEW_VERSION"
-git push origin main --tags
+git push origin master --tags
 
 echo ""
 echo "✅ 完成！GitHub Actions 将自动打包"
