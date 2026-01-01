@@ -1,8 +1,8 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
-  "productName": "File Toolkit",
+  "productName": "小文喵",
   "version": "0.1.0",
-  "identifier": "com.liukaixin.file-toolkit",
+  "identifier": "com.liukaixin.xiaowenmiao",
   "build": {
     "beforeDevCommand": "pnpm dev",
     "devUrl": "http://localhost:1420",
@@ -12,7 +12,7 @@
   "app": {
     "windows": [
       {
-        "title": "File Toolkit - 文件工具箱",
+        "title": "小文喵 - 文件小助手",
         "width": 1000,
         "height": 700,
         "center": true,
@@ -20,7 +20,7 @@
       }
     ],
     "security": {
-      "csp": null
+      "csp": "default-src 'self'; img-src 'self' asset: https://asset.localhost data:; style-src 'self' 'unsafe-inline'"
     }
   },
   "bundle": {

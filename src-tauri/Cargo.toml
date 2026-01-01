@@ -1,7 +1,7 @@
 [package]
-name = "file-toolkit"
+name = "xiao-wen-miao"
 version = "0.1.0"
-description = "跨平台文件工具箱"
+description = "小文喵 - 文件小助手"
 authors = ["you"]
 edition = "2021"
 

@@ -3,9 +3,10 @@ import FileStats from "./pages/FileStats";
 import Dedup from "./pages/Dedup";
 import VideoCut from "./pages/VideoCut";
 import VideoConvert from "./pages/VideoConvert";
+import Watermark from "./pages/Watermark";
 import "./index.css";
 
-type Tab = "stats" | "dedup" | "video-cut" | "video-convert";
+type Tab = "stats" | "dedup" | "video-cut" | "video-convert" | "watermark";
 
 function App() {
   const [activeTab, setActiveTab] = useState<Tab>("stats");
@@ -25,6 +26,7 @@ function App() {
     { key: "dedup", label: "文件去重", icon: "🔍" },
     { key: "video-cut", label: "视频截取", icon: "✂️" },
     { key: "video-convert", label: "格式转换", icon: "🔄" },
+    { key: "watermark", label: "去水印", icon: "🖼️" },
   ];
 
   return (
@@ -42,7 +44,7 @@ function App() {
               📁
             </div>
             {!collapsed && (
-              <span className="font-semibold text-xs whitespace-nowrap">File Toolkit</span>
+              <span className="font-semibold text-xs whitespace-nowrap">小文喵</span>
             )}
           </div>
         </div>
@@ -126,6 +128,9 @@ function App() {
           <div className={activeTab === "video-convert" ? "" : "hidden"}>
             <VideoConvert key={`convert-${resetKey}`} active={activeTab === "video-convert"} />
           </div>
+          <div className={activeTab === "watermark" ? "" : "hidden"}>
+            <Watermark key={`watermark-${resetKey}`} active={activeTab === "watermark"} />
+          </div>
         </div>
       </div>
 
@@ -176,8 +181,8 @@ function App() {
               <div className="w-14 h-14 bg-gradient-to-br from-blue-500 to-purple-600 rounded-xl flex items-center justify-center text-2xl mx-auto mb-3">
                 📁
               </div>
-              <h2 className="text-lg font-semibold mb-1">File Toolkit</h2>
-              <p className="text-gray-400 text-xs">跨平台文件工具箱</p>
+              <h2 className="text-lg font-semibold mb-1">小文喵</h2>
+              <p className="text-gray-400 text-xs">文件小助手，喵~</p>
             </div>
             <div className="p-4 space-y-2 text-xs">
               <div className="flex justify-between">

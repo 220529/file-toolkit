@@ -1040,30 +1040,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "file-toolkit"
-version = "0.1.0"
-dependencies = [
- "base64 0.22.1",
- "env_logger",
- "lazy_static",
- "log",
- "md-5",
- "memmap2",
- "rayon",
- "serde",
- "serde_json",
- "tauri",
- "tauri-build",
- "tauri-plugin-dialog",
- "tauri-plugin-fs",
- "tauri-plugin-opener",
- "tokio",
- "trash",
- "walkdir",
- "xxhash-rust",
-]
-
-[[package]]
 name = "find-msvc-tools"
 version = "0.1.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -5462,6 +5438,30 @@ dependencies = [
  "libc",
  "once_cell",
  "pkg-config",
+]
+
+[[package]]
+name = "xiao-wen-miao"
+version = "0.1.0"
+dependencies = [
+ "base64 0.22.1",
+ "env_logger",
+ "lazy_static",
+ "log",
+ "md-5",
+ "memmap2",
+ "rayon",
+ "serde",
+ "serde_json",
+ "tauri",
+ "tauri-build",
+ "tauri-plugin-dialog",
+ "tauri-plugin-fs",
+ "tauri-plugin-opener",
+ "tokio",
+ "trash",
+ "walkdir",
+ "xxhash-rust",
 ]
 
 [[package]]

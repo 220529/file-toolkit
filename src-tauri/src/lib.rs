@@ -7,6 +7,7 @@ use commands::video::{
     cancel_video_cut, cut_video, cut_video_precise, generate_preview_frame,
     generate_timeline_frames, get_video_duration, get_video_info,
 };
+use commands::watermark::{batch_remove_watermark, remove_watermark, get_image_info};
 use log::info;
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -33,6 +34,9 @@ pub fn run() {
             cancel_video_cut,
             convert_video,
             cancel_convert,
+            get_image_info,
+            remove_watermark,
+            batch_remove_watermark,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
