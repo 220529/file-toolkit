@@ -1,34 +1,15 @@
 use log::info;
 use std::io::{BufRead, BufReader};
-use std::path::PathBuf;
 use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
-use tauri::{AppHandle, Emitter, Manager};
+use tauri::{AppHandle, Emitter};
+
+use super::ffmpeg_utils::{get_ffmpeg_path, get_ffprobe_path};
 
 lazy_static::lazy_static! {
     static ref CONVERT_CANCELLED: Arc<AtomicBool> = Arc::new(AtomicBool::new(false));
     static ref CONVERT_PROCESS: Arc<Mutex<Option<u32>>> = Arc::new(Mutex::new(None));
-}
-
-/// 获取内嵌的 ffmpeg 路径
-fn get_ffmpeg_path(app: &AppHandle) -> PathBuf {
-    app.path()
-        .resource_dir()
-        .ok()
-        .map(|p| p.join("binaries").join("ffmpeg"))
-        .filter(|p| p.exists())
-        .unwrap_or_else(|| PathBuf::from("ffmpeg"))
-}
-
-/// 获取内嵌的 ffprobe 路径
-fn get_ffprobe_path(app: &AppHandle) -> PathBuf {
-    app.path()
-        .resource_dir()
-        .ok()
-        .map(|p| p.join("binaries").join("ffprobe"))
-        .filter(|p| p.exists())
-        .unwrap_or_else(|| PathBuf::from("ffprobe"))
 }
 
 /// 获取视频时长

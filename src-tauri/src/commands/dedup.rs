@@ -10,6 +10,8 @@ use std::time::Instant;
 use tauri::{AppHandle, Emitter};
 use walkdir::WalkDir;
 
+use super::ffmpeg_utils::get_ffmpeg_path;
+
 // 全局取消标志
 lazy_static::lazy_static! {
     static ref DEDUP_CANCELLED: Arc<AtomicBool> = Arc::new(AtomicBool::new(false));
@@ -269,7 +271,6 @@ pub fn cancel_dedup() {
 pub fn get_file_thumbnail(app: tauri::AppHandle, path: String) -> Result<String, String> {
     use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
     use std::process::Command;
-    use tauri::Manager;
 
     let path_lower = path.to_lowercase();
     let ext = path_lower.rsplit('.').next().unwrap_or("");
@@ -288,14 +289,7 @@ pub fn get_file_thumbnail(app: tauri::AppHandle, path: String) -> Result<String,
 
     // 视频类型：用 FFmpeg 截取第一帧
     if ["mp4", "mov", "avi", "mkv", "wmv", "flv", "webm"].contains(&ext) {
-        // 获取内嵌的 ffmpeg 路径
-        let ffmpeg = app
-            .path()
-            .resource_dir()
-            .ok()
-            .map(|p| p.join("binaries").join("ffmpeg"))
-            .filter(|p| p.exists())
-            .unwrap_or_else(|| std::path::PathBuf::from("ffmpeg"));
+        let ffmpeg = get_ffmpeg_path(&app);
 
         let temp_dir = std::env::temp_dir();
         let temp_file = temp_dir.join(format!("thumb_{}.jpg", std::process::id()));

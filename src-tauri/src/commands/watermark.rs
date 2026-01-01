@@ -2,8 +2,10 @@ use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::Path;
 use std::process::Command;
-use tauri::{AppHandle, Manager};
+use tauri::AppHandle;
 use base64::{Engine as _, engine::general_purpose};
+
+use super::ffmpeg_utils::get_ffmpeg_path;
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct CropResult {
@@ -28,18 +30,7 @@ pub struct BrushStroke {
 
 /// 生成缩略图
 fn generate_thumbnail(path: &str, app: &AppHandle) -> Result<String, String> {
-    let ffmpeg_path = app
-        .path()
-        .resource_dir()
-        .map_err(|e| format!("获取资源目录失败: {}", e))?
-        .join("binaries")
-        .join(if cfg!(target_os = "windows") { "ffmpeg.exe" } else { "ffmpeg" });
-
-    let ffmpeg = if ffmpeg_path.exists() {
-        ffmpeg_path.to_string_lossy().to_string()
-    } else {
-        "ffmpeg".to_string()
-    };
+    let ffmpeg = get_ffmpeg_path(app);
 
     // 创建临时文件
     let temp_path = std::env::temp_dir().join(format!("thumb_{}.jpg", std::process::id()));
@@ -136,18 +127,7 @@ pub fn remove_watermark(
         return Err("选区尺寸无效".to_string());
     }
 
-    let ffmpeg_path = app
-        .path()
-        .resource_dir()
-        .map_err(|e| format!("获取资源目录失败: {}", e))?
-        .join("binaries")
-        .join(if cfg!(target_os = "windows") { "ffmpeg.exe" } else { "ffmpeg" });
-
-    let ffmpeg = if ffmpeg_path.exists() {
-        ffmpeg_path.to_string_lossy().to_string()
-    } else {
-        "ffmpeg".to_string()
-    };
+    let ffmpeg = get_ffmpeg_path(&app);
 
     let stem = input.file_stem().unwrap_or_default().to_string_lossy();
     let ext = input.extension().unwrap_or_default().to_string_lossy();

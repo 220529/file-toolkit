@@ -59,11 +59,13 @@ jobs:
           mkdir -p src-tauri/binaries
           curl -L "https://evermeet.cx/ffmpeg/getrelease/ffmpeg/zip" -o /tmp/ffmpeg.zip
           curl -L "https://evermeet.cx/ffmpeg/getrelease/ffprobe/zip" -o /tmp/ffprobe.zip
-          unzip -o /tmp/ffmpeg.zip -d src-tauri/binaries/
-          unzip -o /tmp/ffprobe.zip -d src-tauri/binaries/
-          mv src-tauri/binaries/ffmpeg src-tauri/binaries/ffmpeg-${{ matrix.target }}
-          mv src-tauri/binaries/ffprobe src-tauri/binaries/ffprobe-${{ matrix.target }}
+          unzip -o /tmp/ffmpeg.zip -d /tmp/
+          unzip -o /tmp/ffprobe.zip -d /tmp/
+          # Tauri externalBin 需要带平台后缀的文件名
+          cp /tmp/ffmpeg src-tauri/binaries/ffmpeg-${{ matrix.target }}
+          cp /tmp/ffprobe src-tauri/binaries/ffprobe-${{ matrix.target }}
           chmod +x src-tauri/binaries/*
+          ls -la src-tauri/binaries/
 
       - name: Download FFmpeg (Windows)
         if: matrix.platform == 'windows-latest'
