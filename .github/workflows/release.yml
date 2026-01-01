@@ -95,10 +95,12 @@ jobs:
           releaseName: 'File Toolkit ${{ github.ref_name }}'
           releaseBody: |
             ## 下载
-            - **macOS Intel**: `File Toolkit_x.x.x_x64.dmg`
-            - **macOS Apple Silicon**: `File Toolkit_x.x.x_aarch64.dmg`
-            - **Windows**: `File Toolkit_x.x.x_x64-setup.exe`
-            - **Linux**: `file-toolkit_x.x.x_amd64.deb`
+            | 平台 | 文件 |
+            |------|------|
+            | macOS Intel | `File.Toolkit_x.x.x_x64.dmg` |
+            | macOS Apple Silicon | `File.Toolkit_x.x.x_aarch64.dmg` |
+            | Windows | `File.Toolkit_x.x.x_x64-setup.exe` |
+            | Linux (Debian/Ubuntu) | `File.Toolkit_x.x.x_amd64.deb` |
           releaseDraft: true
           prerelease: false
-          args: --target ${{ matrix.target }}
+          args: --target ${{ matrix.target }} --bundles ${{ matrix.platform == 'macos-latest' && 'dmg' || matrix.platform == 'windows-latest' && 'nsis' || 'deb' }}
