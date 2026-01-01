@@ -16,7 +16,7 @@ interface ScanResult {
   type_count: number;
 }
 
-export default function FileStats() {
+export default function FileStats({ active = true }: { active?: boolean }) {
   const [result, setResult] = useState<ScanResult | null>(null);
   const [loading, setLoading] = useState(false);
   const [selectedPath, setSelectedPath] = useState("");
@@ -38,7 +38,7 @@ export default function FileStats() {
   return (
     <div className="p-6 space-y-6">
       {/* 拖拽选择区域 */}
-      <DropZone onSelect={handleSelect} loading={loading} selectedPath={selectedPath} />
+      <DropZone onSelect={handleSelect} loading={loading} selectedPath={selectedPath} active={active} />
 
       {/* 统计结果 */}
       {result && (

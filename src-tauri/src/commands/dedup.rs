@@ -120,6 +120,7 @@ pub async fn find_duplicates(app: AppHandle, path: String) -> Result<DedupResult
 
         let hash_start = Instant::now();
         let progress_counter = Arc::new(AtomicUsize::new(0));
+        let last_reported = Arc::new(AtomicUsize::new(0));
         let app_clone = app.clone();
         let cancelled_clone = cancelled.clone();
 
@@ -148,19 +149,24 @@ pub async fn find_duplicates(app: AppHandle, path: String) -> Result<DedupResult
                         .unwrap_or(0),
                 };
 
-                // 更新进度
+                // 更新进度（使用单调递增，避免跳动）
                 let current = progress_counter.fetch_add(1, Ordering::Relaxed) + 1;
-                if current % 20 == 0 || current == total_to_hash {
-                    let percent = (current as f64 / total_to_hash as f64) * 100.0;
-                    let _ = app_clone.emit(
-                        "dedup-progress",
-                        DedupProgress {
-                            stage: "计算文件指纹".into(),
-                            current,
-                            total: total_to_hash,
-                            percent,
-                        },
-                    );
+                let last = last_reported.load(Ordering::Relaxed);
+                // 只有当前进度大于上次报告的进度时才更新
+                if current > last && (current - last >= 20 || current == total_to_hash) {
+                    // 尝试更新 last_reported，只有成功时才发送进度
+                    if last_reported.compare_exchange(last, current, Ordering::SeqCst, Ordering::Relaxed).is_ok() {
+                        let percent = (current as f64 / total_to_hash as f64) * 100.0;
+                        let _ = app_clone.emit(
+                            "dedup-progress",
+                            DedupProgress {
+                                stage: "计算文件指纹".into(),
+                                current,
+                                total: total_to_hash,
+                                percent,
+                            },
+                        );
+                    }
                 }
 
                 Some((hash, file_info))

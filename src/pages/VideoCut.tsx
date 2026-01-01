@@ -14,7 +14,7 @@ interface DragDropPayload {
   paths: string[];
 }
 
-export default function VideoCut() {
+export default function VideoCut({ active = true }: { active?: boolean }) {
   const [videoPath, setVideoPath] = useState("");
   const [videoInfo, setVideoInfo] = useState<VideoInfo | null>(null);
   const [startTime, setStartTime] = useState(0);
@@ -41,6 +41,12 @@ export default function VideoCut() {
 
   // 监听拖拽事件
   useEffect(() => {
+    // 非激活状态不监听
+    if (!active) {
+      setDragging(false);
+      return;
+    }
+
     const unlistenEnter = listen<DragDropPayload>("tauri://drag-enter", () => {
       setDragging(true);
     });
@@ -49,6 +55,7 @@ export default function VideoCut() {
     });
     const unlistenDrop = listen<DragDropPayload>("tauri://drag-drop", (event) => {
       setDragging(false);
+      if (!active) return;
       const paths = event.payload.paths;
       if (paths && paths.length > 0) {
         const file = paths[0];
@@ -64,7 +71,7 @@ export default function VideoCut() {
       unlistenLeave.then((fn) => fn());
       unlistenDrop.then((fn) => fn());
     };
-  }, []);
+  }, [active]);
 
   // 监听视频处理进度
   useEffect(() => {

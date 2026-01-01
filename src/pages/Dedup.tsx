@@ -32,13 +32,15 @@ interface DedupProgress {
   percent: number;
 }
 
-export default function Dedup() {
+export default function Dedup({ active = true }: { active?: boolean }) {
   const [result, setResult] = useState<DedupResult | null>(null);
   const [selected, setSelected] = useState<Set<string>>(new Set());
   const [loading, setLoading] = useState(false);
   const [selectedPath, setSelectedPath] = useState("");
   const [progress, setProgress] = useState<DedupProgress | null>(null);
   const [thumbnails, setThumbnails] = useState<Map<string, string>>(new Map());
+  const [groupThumbnails, setGroupThumbnails] = useState<Map<string, string>>(new Map());
+  const [previewImage, setPreviewImage] = useState<string | null>(null);
 
   // 监听进度事件
   useEffect(() => {
@@ -61,6 +63,28 @@ export default function Dedup() {
       setThumbnails((prev) => new Map(prev).set(path, ""));
     }
   }
+
+  // 加载组预览缩略图
+  async function loadGroupThumbnail(hash: string, path: string) {
+    if (groupThumbnails.has(hash)) return;
+    try {
+      const thumb = await invoke<string>("get_file_thumbnail", { path });
+      setGroupThumbnails((prev) => new Map(prev).set(hash, thumb));
+    } catch {
+      setGroupThumbnails((prev) => new Map(prev).set(hash, ""));
+    }
+  }
+
+  // 扫描完成后自动加载组预览
+  useEffect(() => {
+    if (result && result.groups.length > 0) {
+      result.groups.forEach((group) => {
+        if (isPreviewable(group.files[0].name)) {
+          loadGroupThumbnail(group.hash, group.files[0].path);
+        }
+      });
+    }
+  }, [result]);
 
   // 判断是否为可预览的文件类型
   function isPreviewable(name: string): boolean {
@@ -152,7 +176,7 @@ export default function Dedup() {
   return (
     <div className="p-6 space-y-6">
       {/* 拖拽选择区域 */}
-      <DropZone onSelect={handleSelect} loading={loading} selectedPath={selectedPath} />
+      <DropZone onSelect={handleSelect} loading={loading} selectedPath={selectedPath} active={active} />
 
       {/* 进度条 */}
       {loading && progress && (
@@ -162,8 +186,8 @@ export default function Dedup() {
             <div className="flex items-center gap-4">
               <span className="text-sm text-gray-500">
                 {progress.total > 0
-                  ? `${progress.current} / ${progress.total}`
-                  : `已扫描 ${progress.current} 个文件`}
+                  ? `${progress.current.toLocaleString()} / ${progress.total.toLocaleString()}`
+                  : `已扫描 ${progress.current.toLocaleString()} 个文件`}
               </span>
               <button
                 onClick={cancelScan}
@@ -221,16 +245,46 @@ export default function Dedup() {
           {result.groups.map((group, idx) => {
             // 按修改时间排序，最早的排第一
             const sortedFiles = [...group.files].sort((a, b) => a.modified - b.modified);
+            const groupThumb = groupThumbnails.get(group.hash);
+            const canPreview = isPreviewable(group.files[0].name);
+            
             return (
             <div key={group.hash} className="card overflow-hidden">
-              <div className="px-4 py-3 bg-gray-50 border-b border-gray-100 flex items-center justify-between">
-                <span className="font-medium">
-                  第 {idx + 1} 组
-                  <span className="ml-2 text-gray-400 font-normal">
-                    {formatSize(group.size)} × {group.files.length}
-                  </span>
-                </span>
-                <span className="text-sm text-gray-400">
+              <div className="px-4 py-3 bg-gray-50 border-b border-gray-100 flex items-center gap-3">
+                {/* 组预览缩略图 */}
+                {canPreview && (
+                  <div 
+                    className="w-14 h-14 flex-shrink-0 rounded-lg overflow-hidden bg-gray-200 cursor-pointer hover:ring-2 hover:ring-blue-400 transition-all"
+                    onClick={() => groupThumb && setPreviewImage(groupThumb)}
+                  >
+                    {groupThumb ? (
+                      <img src={groupThumb} alt="" className="w-full h-full object-cover" />
+                    ) : (
+                      <div className="w-full h-full flex items-center justify-center text-gray-400 text-xs">
+                        加载中
+                      </div>
+                    )}
+                  </div>
+                )}
+                {!canPreview && (
+                  <div className="w-14 h-14 flex-shrink-0 rounded-lg bg-gray-200 flex items-center justify-center text-2xl">
+                    {getFileIcon(group.files[0].name)}
+                  </div>
+                )}
+                
+                <div className="flex-1 min-w-0">
+                  <div className="font-medium">
+                    第 {idx + 1} 组
+                    <span className="ml-2 text-gray-400 font-normal text-sm">
+                      {formatSize(group.size)} × {group.files.length} 个文件
+                    </span>
+                  </div>
+                  <div className="text-sm text-gray-400 truncate">
+                    {group.files[0].name}
+                  </div>
+                </div>
+                
+                <span className="text-sm text-orange-500 font-medium">
                   可释放 {formatSize(group.size * (group.files.length - 1))}
                 </span>
               </div>
@@ -255,20 +309,29 @@ export default function Dedup() {
                       className="w-4 h-4 rounded"
                     />
                     {/* 缩略图/图标 */}
-                    <div className="w-12 h-12 flex-shrink-0 rounded overflow-hidden bg-gray-100 flex items-center justify-center">
+                    <div 
+                      className="w-10 h-10 flex-shrink-0 rounded overflow-hidden bg-gray-100 flex items-center justify-center cursor-pointer"
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        const thumb = thumbnails.get(file.path) || groupThumb;
+                        if (thumb) setPreviewImage(thumb);
+                      }}
+                    >
                       {thumbnails.get(file.path) ? (
                         <img
                           src={thumbnails.get(file.path)}
                           alt=""
                           className="w-full h-full object-cover"
                         />
+                      ) : groupThumb ? (
+                        <img src={groupThumb} alt="" className="w-full h-full object-cover opacity-60" />
                       ) : (
-                        <span className="text-2xl">{getFileIcon(file.name)}</span>
+                        <span className="text-xl">{getFileIcon(file.name)}</span>
                       )}
                     </div>
                     <div className="flex-1 min-w-0">
-                      <div className="font-medium truncate">{file.name}</div>
-                      <div className="text-sm text-gray-400 truncate">{file.path}</div>
+                      <div className="font-medium truncate text-sm">{file.name}</div>
+                      <div className="text-xs text-gray-400 truncate">{file.path}</div>
                     </div>
                     {fileIdx === 0 && (
                       <span className="text-xs px-2 py-1 bg-green-100 text-green-600 rounded">
@@ -281,6 +344,28 @@ export default function Dedup() {
             </div>
             );
           })}
+        </div>
+      )}
+
+      {/* 图片预览弹窗 */}
+      {previewImage && (
+        <div 
+          className="fixed inset-0 bg-black/80 flex items-center justify-center z-50 cursor-pointer"
+          onClick={() => setPreviewImage(null)}
+        >
+          <div className="relative max-w-[90vw] max-h-[90vh]">
+            <img 
+              src={previewImage} 
+              alt="预览" 
+              className="max-w-full max-h-[90vh] object-contain rounded-lg shadow-2xl"
+            />
+            <button 
+              className="absolute -top-3 -right-3 w-8 h-8 bg-white rounded-full shadow-lg flex items-center justify-center text-gray-600 hover:text-gray-900"
+              onClick={() => setPreviewImage(null)}
+            >
+              ✕
+            </button>
+          </div>
         </div>
       )}
     </div>

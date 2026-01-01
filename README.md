@@ -1,7 +1,95 @@
-# Tauri + React + Typescript
+# File Toolkit
 
-This template should help get you started developing with Tauri, React and Typescript in Vite.
+跨平台文件工具箱，基于 Tauri 2.0 + React + TypeScript + Rust 构建。
 
-## Recommended IDE Setup
+## 功能特性
 
-- [VS Code](https://code.visualstudio.com/) + [Tauri](https://marketplace.visualstudio.com/items?itemName=tauri-apps.tauri-vscode) + [rust-analyzer](https://marketplace.visualstudio.com/items?itemName=rust-lang.rust-analyzer)
+### 📊 文件统计
+- 递归扫描文件夹，统计各类型文件数量和大小
+- 按文件类型分组展示，支持占比分析
+
+### 🔍 文件去重
+- 两阶段扫描：先按文件大小筛选，再计算哈希
+- xxHash3 快速哈希（比 MD5 快 5-10 倍）
+- 大文件采样哈希（头部 + 中间 + 尾部）
+- 并行计算，充分利用多核 CPU
+- 缩略图预览（图片直接显示，视频用 FFmpeg 截帧）
+- 智能选择（保留最早文件）
+- 支持取消操作
+
+### ✂️ 视频截取
+- 快速模式：无损截取（-c copy），秒级完成
+- 精确模式：重新编码，时间精确到毫秒
+- 时间轴缩略图预览
+- 实时进度显示
+- 支持取消操作
+
+## 技术栈
+
+| 层级 | 技术 |
+|------|------|
+| 前端 | React 19 + TypeScript + Tailwind CSS |
+| 后端 | Rust + Tauri 2.0 |
+| 哈希 | xxHash3 + memmap2 |
+| 并行 | rayon |
+| 视频 | FFmpeg（外部依赖） |
+
+## 开发环境
+
+```bash
+# 安装依赖
+pnpm install
+
+# 开发模式
+pnpm tauri dev
+
+# 构建
+pnpm tauri build
+```
+
+## 系统要求
+
+- Node.js 20.19+ 或 22.12+
+- Rust 1.70+
+- FFmpeg（视频功能需要）
+
+### 安装 FFmpeg
+
+```bash
+# macOS
+brew install ffmpeg
+
+# Windows (使用 Chocolatey)
+choco install ffmpeg
+
+# Ubuntu/Debian
+sudo apt install ffmpeg
+```
+
+## 打包说明
+
+运行 `pnpm tauri build` 后：
+- macOS: `src-tauri/target/release/bundle/dmg/`
+- Windows: `src-tauri/target/release/bundle/msi/`
+- Linux: `src-tauri/target/release/bundle/deb/`
+
+**注意**：FFmpeg 不会打包进应用，用户需要自行安装。
+
+## 项目结构
+
+```
+file-toolkit/
+├── src/                    # 前端代码
+│   ├── components/         # 通用组件
+│   ├── pages/              # 页面组件
+│   └── utils/              # 工具函数
+├── src-tauri/              # Rust 后端
+│   └── src/
+│       ├── commands/       # Tauri 命令
+│       └── lib.rs          # 入口
+└── docs/                   # 文档
+```
+
+## License
+
+MIT

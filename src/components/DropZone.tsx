@@ -6,17 +6,24 @@ interface DropZoneProps {
   onSelect: (path: string) => void;
   loading?: boolean;
   selectedPath?: string;
+  /** 是否激活（只有激活的 DropZone 才响应拖拽事件） */
+  active?: boolean;
 }
 
 interface DragDropPayload {
   paths: string[];
-  position: { x: number; y: number };
 }
 
-export default function DropZone({ onSelect, loading, selectedPath }: DropZoneProps) {
+export default function DropZone({ onSelect, loading, selectedPath, active = true }: DropZoneProps) {
   const [dragging, setDragging] = useState(false);
 
   useEffect(() => {
+    // 只有激活状态才监听拖拽事件
+    if (!active) {
+      setDragging(false);
+      return;
+    }
+
     // 监听 Tauri 的拖拽进入事件
     const unlistenEnter = listen<DragDropPayload>("tauri://drag-enter", () => {
       setDragging(true);
@@ -30,9 +37,10 @@ export default function DropZone({ onSelect, loading, selectedPath }: DropZonePr
     // 监听 Tauri 的拖拽放下事件
     const unlistenDrop = listen<DragDropPayload>("tauri://drag-drop", (event) => {
       setDragging(false);
+      // 只有激活的 DropZone 才处理
+      if (!active) return;
       const paths = event.payload.paths;
       if (paths && paths.length > 0) {
-        // 取第一个路径
         onSelect(paths[0]);
       }
     });
@@ -42,7 +50,7 @@ export default function DropZone({ onSelect, loading, selectedPath }: DropZonePr
       unlistenLeave.then((fn) => fn());
       unlistenDrop.then((fn) => fn());
     };
-  }, [onSelect]);
+  }, [onSelect, active]);
 
   const handleClick = async () => {
     if (loading) return;
@@ -56,7 +64,7 @@ export default function DropZone({ onSelect, loading, selectedPath }: DropZonePr
     <div className="card p-6">
       <div
         onClick={handleClick}
-        className={`drop-zone ${dragging ? "dragging" : ""}`}
+        className={`drop-zone ${dragging && active ? "dragging" : ""}`}
       >
         <div className="text-5xl mb-4">
           {loading ? "⏳" : dragging ? "📂" : "📁"}
