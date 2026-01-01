@@ -153,7 +153,7 @@ function App() {
             <div className="p-5 text-center">
               <div className="text-4xl mb-3">🔄</div>
               <h3 className="font-medium mb-2">确认重置？</h3>
-              <p className="text-xs text-gray-500">将清空所有页面的当前状态</p>
+              <p className="text-xs text-gray-500">将清空所有页面当前状态</p>
             </div>
             <div className="p-3 bg-gray-50 border-t border-gray-100 flex gap-2">
               <button
