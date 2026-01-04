@@ -93,6 +93,11 @@ jobs:
           cp /tmp/ffmpeg-*-amd64-static/ffprobe src-tauri/binaries/ffprobe-${{ matrix.target }}
           chmod +x src-tauri/binaries/*
 
+      - name: Get version
+        id: version
+        run: echo "VERSION=${GITHUB_REF_NAME#v}" >> $GITHUB_OUTPUT
+        shell: bash
+
       - name: Build Tauri
         uses: tauri-apps/tauri-action@v0
         env:
@@ -104,10 +109,10 @@ jobs:
             ## 下载
             | 平台 | 文件 |
             |------|------|
-            | macOS Intel | `小文喵_x.x.x_x64.dmg` |
-            | macOS Apple Silicon | `小文喵_x.x.x_aarch64.dmg` |
-            | Windows | `小文喵_x.x.x_x64-setup.exe` |
-            | Linux (Debian/Ubuntu) | `小文喵_x.x.x_amd64.deb` |
+            | macOS Intel | `小文喵_${{ steps.version.outputs.VERSION }}_x64.dmg` |
+            | macOS Apple Silicon | `小文喵_${{ steps.version.outputs.VERSION }}_aarch64.dmg` |
+            | Windows | `小文喵_${{ steps.version.outputs.VERSION }}_x64-setup.exe` |
+            | Linux (Debian/Ubuntu) | `小文喵_${{ steps.version.outputs.VERSION }}_amd64.deb` |
           releaseDraft: false
           prerelease: false
           args: --target ${{ matrix.target }} --bundles ${{ matrix.platform == 'macos-latest' && 'dmg' || matrix.platform == 'windows-latest' && 'nsis' || 'deb' }}

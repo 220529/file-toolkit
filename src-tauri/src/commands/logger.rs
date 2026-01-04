@@ -76,6 +76,7 @@ pub fn log_error(message: &str) {
     log::error!("{}", message);
 }
 
+#[allow(dead_code)]
 pub fn log_warn(message: &str) {
     if let Some(path) = LOG_PATH.lock().unwrap().as_ref() {
         let _ = write_log_internal(path, "WARN", message);

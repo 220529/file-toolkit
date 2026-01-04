@@ -196,7 +196,7 @@ pub fn cut_video(
         input, output, start_time, end_time, duration
     );
 
-    let status = Command::new(&ffmpeg)
+    let result = Command::new(&ffmpeg)
         .args([
             "-y",
             "-ss",
@@ -211,10 +211,12 @@ pub fn cut_video(
             "make_zero",
             &output,
         ])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
         .status()
         .map_err(|e| format!("执行 ffmpeg 失败: {}", e))?;
 
-    if status.success() {
+    if result.success() {
         info!("[截取] 快速模式完成: {}", output);
         Ok(output)
     } else {
