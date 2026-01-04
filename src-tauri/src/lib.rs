@@ -8,17 +8,22 @@ use commands::video::{
     generate_timeline_frames, get_video_duration, get_video_info,
 };
 use commands::watermark::{batch_remove_watermark, remove_watermark, get_image_info};
-use log::info;
+use commands::logger::{get_log_path, get_recent_logs};
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
-    info!("File Toolkit 启动中...");
 
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_fs::init())
+        .setup(|app| {
+            // 初始化文件日志
+            commands::logger::init_logger(app.handle());
+            commands::logger::log_info("小文喵启动完成");
+            Ok(())
+        })
         .invoke_handler(tauri::generate_handler![
             scan_directory,
             find_duplicates,
@@ -38,6 +43,8 @@ pub fn run() {
             remove_watermark,
             batch_remove_watermark,
             get_file_size,
+            get_log_path,
+            get_recent_logs,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

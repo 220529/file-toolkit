@@ -7,6 +7,7 @@ use std::sync::{Arc, Mutex};
 use tauri::{AppHandle, Emitter};
 
 use super::ffmpeg_utils::{get_ffmpeg_path, get_ffprobe_path};
+use super::logger::{log_info, log_error};
 
 // 全局变量存储当前 FFmpeg 进程，用于取消
 lazy_static::lazy_static! {
@@ -81,6 +82,7 @@ pub fn generate_timeline_frames(
 #[tauri::command]
 pub fn get_video_duration(app: AppHandle, path: String) -> Result<f64, String> {
     let ffprobe = get_ffprobe_path(&app);
+    log_info(&format!("[视频] 获取时长: {}, ffprobe: {:?}", path, ffprobe));
 
     let output = Command::new(&ffprobe)
         .args([
@@ -93,18 +95,28 @@ pub fn get_video_duration(app: AppHandle, path: String) -> Result<f64, String> {
             &path,
         ])
         .output()
-        .map_err(|e| format!("执行 ffprobe 失败: {}", e))?;
+        .map_err(|e| {
+            let msg = format!("执行 ffprobe 失败: {}", e);
+            log_error(&format!("[视频] {}", msg));
+            msg
+        })?;
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
-        return Err(format!("ffprobe 错误: {}", stderr));
+        let msg = format!("ffprobe 错误: {}", stderr);
+        log_error(&format!("[视频] {}", msg));
+        return Err(msg);
     }
 
     let duration_str = String::from_utf8_lossy(&output.stdout);
     duration_str
         .trim()
         .parse::<f64>()
-        .map_err(|e| format!("解析时长失败: {}", e))
+        .map_err(|e| {
+            let msg = format!("解析时长失败: {}", e);
+            log_error(&format!("[视频] {}", msg));
+            msg
+        })
 }
 
 /// 获取视频信息

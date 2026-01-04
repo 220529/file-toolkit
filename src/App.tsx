@@ -5,6 +5,8 @@ import Dedup from "./pages/Dedup";
 import VideoCut from "./pages/VideoCut";
 import VideoConvert from "./pages/VideoConvert";
 import Watermark from "./pages/Watermark";
+import { ToastProvider } from "./components/Toast";
+import LogViewer from "./components/LogViewer";
 import "./index.css";
 
 type Tab = "stats" | "dedup" | "video-cut" | "video-convert" | "watermark";
@@ -14,6 +16,7 @@ function App() {
   const [collapsed, setCollapsed] = useState(false);
   const [showAbout, setShowAbout] = useState(false);
   const [showResetConfirm, setShowResetConfirm] = useState(false);
+  const [showLogs, setShowLogs] = useState(false);
   const [resetKey, setResetKey] = useState(0);
   const [version, setVersion] = useState("0.0.0");
 
@@ -36,6 +39,7 @@ function App() {
   ];
 
   return (
+    <ToastProvider>
     <div className="h-screen flex bg-[#f5f5f5]">
       {/* 左侧边栏 */}
       <div
@@ -77,20 +81,27 @@ function App() {
         </nav>
 
         {/* 底部：设置 */}
-        <div className="p-1 border-t border-gray-100 flex justify-center gap-1">
+        <div className={`p-1 border-t border-gray-100 ${collapsed ? "flex flex-col items-center gap-0.5" : "flex justify-center gap-1"}`}>
           <button
             onClick={() => setShowResetConfirm(true)}
-            className="p-2 text-gray-500 hover:text-gray-700 hover:bg-gray-50 rounded-md transition-all"
+            className={`p-2 text-gray-500 hover:text-red-500 hover:bg-red-50 rounded-md transition-all ${collapsed ? "w-full flex justify-center" : ""}`}
             title="重置"
           >
             <span className="text-base">🔄</span>
           </button>
           <button
+            onClick={() => setShowLogs(true)}
+            className={`p-2 text-gray-500 hover:text-gray-700 hover:bg-gray-50 rounded-md transition-all ${collapsed ? "w-full flex justify-center" : ""}`}
+            title="日志"
+          >
+            <span className="text-base">📋</span>
+          </button>
+          <button
             onClick={() => setShowAbout(true)}
-            className="p-2 text-gray-500 hover:text-gray-700 hover:bg-gray-50 rounded-md transition-all"
+            className={`p-2 text-gray-500 hover:text-gray-700 hover:bg-gray-50 rounded-md transition-all ${collapsed ? "w-full flex justify-center" : ""}`}
             title="关于"
           >
-            <span className="text-base">⚙️</span>
+            <span className="text-base">ℹ️</span>
           </button>
         </div>
       </div>
@@ -219,7 +230,11 @@ function App() {
           </div>
         </div>
       )}
+
+      {/* 日志查看器 */}
+      {showLogs && <LogViewer onClose={() => setShowLogs(false)} />}
     </div>
+    </ToastProvider>
   );
 }
 

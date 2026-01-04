@@ -6,6 +6,7 @@ use tauri::AppHandle;
 use base64::{Engine as _, engine::general_purpose};
 
 use super::ffmpeg_utils::get_ffmpeg_path;
+use super::logger::{log_info, log_error};
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct CropResult {
@@ -60,12 +61,16 @@ fn generate_thumbnail(path: &str, app: &AppHandle) -> Result<String, String> {
 /// 获取图片信息（跨平台：使用 ffprobe）
 #[tauri::command]
 pub fn get_image_info(app: AppHandle, path: String) -> Result<ImageInfo, String> {
+    log_info(&format!("[去水印] 获取图片信息: {}", path));
+    
     let path_obj = Path::new(&path);
     if !path_obj.exists() {
+        log_error(&format!("[去水印] 文件不存在: {}", path));
         return Err("文件不存在".to_string());
     }
 
     let ffprobe = super::ffmpeg_utils::get_ffprobe_path(&app);
+    log_info(&format!("[去水印] 使用 ffprobe: {:?}", ffprobe));
 
     // 使用 ffprobe 获取图片尺寸（跨平台）
     let output = Command::new(&ffprobe)
@@ -77,11 +82,17 @@ pub fn get_image_info(app: AppHandle, path: String) -> Result<ImageInfo, String>
             &path,
         ])
         .output()
-        .map_err(|e| format!("获取图片信息失败: {}", e))?;
+        .map_err(|e| {
+            let msg = format!("获取图片信息失败: {}", e);
+            log_error(&format!("[去水印] {}", msg));
+            msg
+        })?;
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
-        return Err(format!("ffprobe 错误: {}", stderr));
+        let msg = format!("ffprobe 错误: {}", stderr);
+        log_error(&format!("[去水印] {}", msg));
+        return Err(msg);
     }
 
     let stdout = String::from_utf8_lossy(&output.stdout);
@@ -97,8 +108,11 @@ pub fn get_image_info(app: AppHandle, path: String) -> Result<ImageInfo, String>
     };
 
     if width == 0 || height == 0 {
+        log_error(&format!("[去水印] 无法获取图片尺寸, ffprobe 输出: {}", stdout));
         return Err("无法获取图片尺寸".to_string());
     }
+
+    log_info(&format!("[去水印] 图片尺寸: {}x{}", width, height));
 
     // 生成缩略图
     let thumbnail = generate_thumbnail(&path, &app).unwrap_or_default();

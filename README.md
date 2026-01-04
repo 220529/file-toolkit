@@ -39,14 +39,59 @@
 
 ## 本地开发
 
-```bash
-# 环境要求：Node.js 20.19+、pnpm、Rust 1.70+、FFmpeg
+### 环境要求
 
+| 依赖 | 版本 | 说明 |
+|------|------|------|
+| Node.js | 20.19+ 或 22.12+ | 推荐使用 nvm 管理 |
+| pnpm | 最新版 | `npm install -g pnpm` |
+| Rust | 1.70+ | [rustup.rs](https://rustup.rs) |
+| FFmpeg | 最新版 | 需放到 `src-tauri/binaries/` |
+
+### macOS
+
+```bash
+# 安装 Rust
+curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
+
+# 克隆并启动
 git clone https://github.com/220529/file-toolkit.git
 cd file-toolkit
 pnpm install
 pnpm tauri dev
 ```
+
+### Windows
+
+Windows 需要额外安装 MSVC 编译工具链：
+
+```powershell
+# 1. 安装 Rust
+winget install Rustlang.Rustup
+
+# 2. 安装 Visual Studio Build Tools（必须，约 2-3GB）
+winget install Microsoft.VisualStudio.2022.BuildTools --override "--wait --passive --add Microsoft.VisualStudio.Workload.VCTools --includeRecommended"
+
+# 3. 重启终端，确认 cargo 可用
+cargo -V
+
+# 4. 克隆项目
+git clone https://github.com/220529/file-toolkit.git
+cd file-toolkit
+pnpm install
+
+# 5. 下载 FFmpeg 到 binaries 目录
+# 从 https://www.gyan.dev/ffmpeg/builds/ffmpeg-release-essentials.zip 下载
+# 解压后将 bin/ffmpeg.exe 和 bin/ffprobe.exe 复制到 src-tauri/binaries/
+# 并重命名为：
+#   - ffmpeg-x86_64-pc-windows-msvc.exe
+#   - ffprobe-x86_64-pc-windows-msvc.exe
+
+# 6. 启动开发
+pnpm tauri dev
+```
+
+> ⚠️ 如果 `cargo` 命令找不到，需要将 `%USERPROFILE%\.cargo\bin` 添加到系统 PATH
 
 ## 打包
 

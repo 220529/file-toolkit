@@ -145,3 +145,20 @@ body {
 .stat-card.orange {
   background: linear-gradient(135deg, #f093fb 0%, #f5576c 100%);
 }
+
+
+/* Toast 动画 */
+@keyframes slide-in {
+  from {
+    transform: translateX(100%);
+    opacity: 0;
+  }
+  to {
+    transform: translateX(0);
+    opacity: 1;
+  }
+}
+
+.animate-slide-in {
+  animation: slide-in 0.3s ease-out;
+}

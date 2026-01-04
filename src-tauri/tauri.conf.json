@@ -4,7 +4,7 @@
   "version": "0.2.7",
   "identifier": "com.liukaixin.xiaowenmiao",
   "build": {
-    "beforeDevCommand": "pnpm dev",
+    "beforeDevCommand": "pnpm vite dev --port 1420",
     "devUrl": "http://localhost:1420",
     "beforeBuildCommand": "pnpm build",
     "frontendDist": "../dist"
