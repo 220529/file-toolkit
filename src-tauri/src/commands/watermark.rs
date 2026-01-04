@@ -57,7 +57,7 @@ fn generate_thumbnail(path: &str, app: &AppHandle) -> Result<String, String> {
     Ok(format!("data:image/jpeg;base64,{}", base64_str))
 }
 
-/// 获取图片信息
+/// 获取图片信息（跨平台：使用 ffprobe）
 #[tauri::command]
 pub fn get_image_info(app: AppHandle, path: String) -> Result<ImageInfo, String> {
     let path_obj = Path::new(&path);
@@ -65,28 +65,36 @@ pub fn get_image_info(app: AppHandle, path: String) -> Result<ImageInfo, String>
         return Err("文件不存在".to_string());
     }
 
-    // 使用 sips 获取图片尺寸 (macOS)
-    let output = Command::new("sips")
-        .args(["-g", "pixelWidth", "-g", "pixelHeight", &path])
+    let ffprobe = super::ffmpeg_utils::get_ffprobe_path(&app);
+
+    // 使用 ffprobe 获取图片尺寸（跨平台）
+    let output = Command::new(&ffprobe)
+        .args([
+            "-v", "error",
+            "-select_streams", "v:0",
+            "-show_entries", "stream=width,height",
+            "-of", "csv=p=0:s=x",
+            &path,
+        ])
         .output()
         .map_err(|e| format!("获取图片信息失败: {}", e))?;
 
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    
-    let mut width = 0u32;
-    let mut height = 0u32;
-    
-    for line in stdout.lines() {
-        if line.contains("pixelWidth") {
-            if let Some(w) = line.split_whitespace().last() {
-                width = w.parse().unwrap_or(0);
-            }
-        } else if line.contains("pixelHeight") {
-            if let Some(h) = line.split_whitespace().last() {
-                height = h.parse().unwrap_or(0);
-            }
-        }
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(format!("ffprobe 错误: {}", stderr));
     }
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let parts: Vec<&str> = stdout.trim().split('x').collect();
+    
+    let (width, height) = if parts.len() >= 2 {
+        (
+            parts[0].parse().unwrap_or(0),
+            parts[1].parse().unwrap_or(0),
+        )
+    } else {
+        (0, 0)
+    };
 
     if width == 0 || height == 0 {
         return Err("无法获取图片尺寸".to_string());

@@ -72,11 +72,16 @@ jobs:
         shell: pwsh
         run: |
           New-Item -ItemType Directory -Force -Path src-tauri/binaries
+          Write-Host "Downloading FFmpeg..."
           Invoke-WebRequest -Uri "https://www.gyan.dev/ffmpeg/builds/ffmpeg-release-essentials.zip" -OutFile "$env:TEMP\ffmpeg.zip"
+          Write-Host "Extracting..."
           Expand-Archive -Path "$env:TEMP\ffmpeg.zip" -DestinationPath "$env:TEMP\ffmpeg" -Force
           $ffmpegDir = Get-ChildItem -Path "$env:TEMP\ffmpeg" -Directory | Select-Object -First 1
+          Write-Host "FFmpeg dir: $($ffmpegDir.FullName)"
           Copy-Item "$($ffmpegDir.FullName)\bin\ffmpeg.exe" "src-tauri/binaries/ffmpeg-${{ matrix.target }}.exe"
           Copy-Item "$($ffmpegDir.FullName)\bin\ffprobe.exe" "src-tauri/binaries/ffprobe-${{ matrix.target }}.exe"
+          Write-Host "Files in binaries:"
+          Get-ChildItem -Path "src-tauri/binaries" | ForEach-Object { Write-Host "  $($_.Name) - $($_.Length) bytes" }
 
       - name: Download FFmpeg (Linux)
         if: matrix.platform == 'ubuntu-22.04'
