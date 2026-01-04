@@ -54,10 +54,30 @@
 # 安装 Rust
 curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
 
-# 克隆并启动
+# 克隆项目
 git clone https://github.com/220529/file-toolkit.git
 cd file-toolkit
 pnpm install
+
+# 下载 FFmpeg 到 binaries 目录
+mkdir -p src-tauri/binaries
+curl -L "https://evermeet.cx/ffmpeg/getrelease/ffmpeg/zip" -o /tmp/ffmpeg.zip
+curl -L "https://evermeet.cx/ffmpeg/getrelease/ffprobe/zip" -o /tmp/ffprobe.zip
+unzip -o /tmp/ffmpeg.zip -d /tmp/
+unzip -o /tmp/ffprobe.zip -d /tmp/
+
+# 根据你的 Mac 类型选择（二选一）
+# Intel Mac:
+cp /tmp/ffmpeg src-tauri/binaries/ffmpeg-x86_64-apple-darwin
+cp /tmp/ffprobe src-tauri/binaries/ffprobe-x86_64-apple-darwin
+
+# Apple Silicon Mac:
+cp /tmp/ffmpeg src-tauri/binaries/ffmpeg-aarch64-apple-darwin
+cp /tmp/ffprobe src-tauri/binaries/ffprobe-aarch64-apple-darwin
+
+chmod +x src-tauri/binaries/*
+
+# 启动开发
 pnpm tauri dev
 ```
 
@@ -93,13 +113,14 @@ pnpm tauri dev
 
 > ⚠️ 如果 `cargo` 命令找不到，需要将 `%USERPROFILE%\.cargo\bin` 添加到系统 PATH
 
+### Linux
+
+参考 macOS 步骤，额外安装依赖：`sudo apt-get install libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf`
+
 ## 打包
 
 ```bash
-# macOS 需要先安装
-brew install create-dmg
-
-# 下载 FFmpeg 到 src-tauri/binaries/（见 GitHub Actions 配置）
+# 确保 FFmpeg 已下载到 src-tauri/binaries/
 pnpm tauri build
 ```
 
