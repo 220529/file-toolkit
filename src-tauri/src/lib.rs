@@ -2,7 +2,8 @@ mod commands;
 
 use commands::convert::{cancel_convert, convert_video, get_file_size};
 use commands::dedup::{cancel_dedup, delete_files, find_duplicates, get_file_thumbnail};
-use commands::file_stats::scan_directory;
+use commands::file_stats::{cancel_file_stats, scan_directory};
+use commands::system::open_file_path;
 use commands::video::{
     cancel_video_cut, cut_video, cut_video_precise, generate_preview_frame,
     generate_timeline_frames, get_video_duration, get_video_info,
@@ -12,8 +13,6 @@ use commands::logger::{get_log_path, get_recent_logs};
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
-    env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
-
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
@@ -26,6 +25,7 @@ pub fn run() {
         })
         .invoke_handler(tauri::generate_handler![
             scan_directory,
+            cancel_file_stats,
             find_duplicates,
             delete_files,
             get_file_thumbnail,
@@ -45,6 +45,7 @@ pub fn run() {
             get_file_size,
             get_log_path,
             get_recent_logs,
+            open_file_path,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

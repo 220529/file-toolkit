@@ -1,16 +1,22 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
+import { useFileActions } from "../hooks/useFileActions";
+import { Badge } from "./ui/badge";
+import { Button } from "./ui/button";
+import { CardDescription, CardTitle } from "./ui/card";
+import { Modal } from "./ui/modal";
 
 interface Props {
   onClose: () => void;
 }
 
 export default function LogViewer({ onClose }: Props) {
-  const [logs, setLogs] = useState<string>("");
-  const [logPath, setLogPath] = useState<string>("");
+  const [logs, setLogs] = useState("加载中…");
+  const [logPath, setLogPath] = useState("");
   const [loading, setLoading] = useState(false);
+  const fileActions = useFileActions();
 
-  const loadLogs = async () => {
+  async function loadLogs() {
     setLoading(true);
     try {
       const [path, content] = await Promise.all([
@@ -18,66 +24,60 @@ export default function LogViewer({ onClose }: Props) {
         invoke<string>("get_recent_logs", { lines: 200 }),
       ]);
       setLogPath(path);
-      setLogs(content);
+      setLogs(content || "暂无日志");
     } catch (e) {
       setLogs(`加载日志失败: ${e}`);
+    } finally {
+      setLoading(false);
     }
-    setLoading(false);
-  };
+  }
 
-  // 首次加载
-  useState(() => {
-    loadLogs();
-  });
+  useEffect(() => {
+    void loadLogs();
+    const timer = window.setInterval(() => {
+      void loadLogs();
+    }, 2000);
+    return () => {
+      window.clearInterval(timer);
+    };
+  }, []);
 
   return (
-    <div
-      className="fixed inset-0 bg-black/50 flex items-center justify-center z-50"
-      onClick={onClose}
-    >
-      <div
-        className="bg-white rounded-xl shadow-2xl w-[700px] max-h-[80vh] overflow-hidden flex flex-col"
-        onClick={(e) => e.stopPropagation()}
-      >
-        {/* 标题栏 */}
-        <div className="p-4 border-b border-gray-100 flex items-center justify-between">
-          <div>
-            <h3 className="font-medium">📋 运行日志</h3>
-            {logPath && (
-              <p className="text-xs text-gray-400 mt-1 font-mono">{logPath}</p>
-            )}
+    <Modal onClose={onClose}>
+      <div className="flex max-h-[84vh] flex-col">
+        <div className="flex items-start justify-between gap-4 border-b border-slate-100 px-6 py-5">
+          <div className="min-w-0">
+            <div className="mb-2 flex items-center gap-3">
+              <Badge tone="info">运行日志</Badge>
+              <Badge tone="default">最近 200 行</Badge>
+            </div>
+            <CardTitle className="text-xl">日志查看器</CardTitle>
+            <CardDescription className="mt-2">
+              用于排查扫描、哈希、ffmpeg 处理等运行状态。
+            </CardDescription>
+            {logPath && <div className="mt-2 truncate text-xs text-slate-400">{logPath}</div>}
           </div>
           <div className="flex items-center gap-2">
-            <button
-              onClick={loadLogs}
-              disabled={loading}
-              className="px-3 py-1.5 text-sm bg-gray-100 hover:bg-gray-200 rounded-lg transition-colors"
-            >
-              {loading ? "⏳" : "🔄"} 刷新
-            </button>
+            {logPath && (
+              <Button variant="secondary" size="sm" onClick={() => void fileActions.openFile(logPath)}>
+                打开位置
+              </Button>
+            )}
+            <Button variant="secondary" size="sm" onClick={() => void loadLogs()} disabled={loading}>
+              {loading ? "刷新中…" : "刷新"}
+            </Button>
           </div>
         </div>
-
-        {/* 日志内容 */}
-        <div className="flex-1 overflow-auto p-4 bg-gray-900">
-          <pre className="text-xs text-gray-300 font-mono whitespace-pre-wrap leading-relaxed">
-            {logs || "暂无日志"}
-          </pre>
+        <div className="flex-1 overflow-auto bg-slate-950 px-6 py-5">
+          <pre className="whitespace-pre-wrap break-words text-xs leading-6 text-slate-200">{logs}</pre>
         </div>
-
-        {/* 底部 */}
-        <div className="p-3 bg-gray-50 border-t border-gray-100 flex justify-between items-center">
-          <span className="text-xs text-gray-400">
-            日志自动保留 7 天
-          </span>
-          <button
-            onClick={onClose}
-            className="px-4 py-2 text-sm bg-blue-500 hover:bg-blue-600 text-white rounded-lg transition-colors"
-          >
+        <div className="flex items-center justify-between border-t border-slate-100 bg-slate-50 px-6 py-4">
+          <div className="text-xs text-slate-500">日志文件默认保留 7 天。</div>
+          <Button variant="primary" onClick={onClose}>
             关闭
-          </button>
+          </Button>
         </div>
       </div>
-    </div>
+    </Modal>
   );
 }

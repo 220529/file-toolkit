@@ -34,7 +34,7 @@ fn generate_thumbnail(path: &str, app: &AppHandle) -> Result<String, String> {
     let ffmpeg = get_ffmpeg_path(app);
 
     // 创建临时文件
-    let temp_path = std::env::temp_dir().join(format!("thumb_{}.jpg", std::process::id()));
+    let temp_path = build_temp_thumbnail_path();
     
     let output = Command::new(&ffmpeg)
         .args([
@@ -56,6 +56,14 @@ fn generate_thumbnail(path: &str, app: &AppHandle) -> Result<String, String> {
     
     let base64_str = general_purpose::STANDARD.encode(&data);
     Ok(format!("data:image/jpeg;base64,{}", base64_str))
+}
+
+fn build_temp_thumbnail_path() -> std::path::PathBuf {
+    let unique = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    std::env::temp_dir().join(format!("thumb_{}_{}.jpg", std::process::id(), unique))
 }
 
 /// 获取图片信息（跨平台：使用 ffprobe）

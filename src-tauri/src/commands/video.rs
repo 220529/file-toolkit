@@ -15,17 +15,24 @@ lazy_static::lazy_static! {
     static ref FFMPEG_PROCESS: Arc<Mutex<Option<u32>>> = Arc::new(Mutex::new(None));
 }
 
+fn build_temp_preview_path() -> std::path::PathBuf {
+    let unique = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    std::env::temp_dir().join(format!("preview_{}_{}.jpg", std::process::id(), unique))
+}
+
 /// 生成视频预览帧（返回 base64 编码的图片）
 #[tauri::command]
 pub fn generate_preview_frame(app: AppHandle, path: String, time: f64) -> Result<String, String> {
     debug!("[预览] 生成预览帧: {} @ {:.2}s", path, time);
     let ffmpeg = get_ffmpeg_path(&app);
 
-    let temp_dir = std::env::temp_dir();
-    let temp_file = temp_dir.join(format!("preview_{}.jpg", std::process::id()));
+    let temp_file = build_temp_preview_path();
     let temp_path = temp_file.to_string_lossy().to_string();
 
-    let status = Command::new(&ffmpeg)
+    let output = Command::new(&ffmpeg)
         .args([
             "-y",
             "-ss",
@@ -41,8 +48,10 @@ pub fn generate_preview_frame(app: AppHandle, path: String, time: f64) -> Result
         .output()
         .map_err(|e| format!("执行 ffmpeg 失败: {}", e))?;
 
-    if !status.status.success() {
-        return Err("生成预览帧失败".into());
+    if !output.status.success() {
+        let _ = std::fs::remove_file(&temp_file);
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(format!("生成预览帧失败: {}", stderr.trim()));
     }
 
     let image_data =
@@ -140,12 +149,21 @@ pub fn get_video_info(app: AppHandle, path: String) -> Result<VideoInfo, String>
         .output()
         .map_err(|e| format!("执行 ffprobe 失败: {}", e))?;
 
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(format!("读取视频流信息失败: {}", stderr.trim()));
+    }
+
     let info_str = String::from_utf8_lossy(&output.stdout);
     let parts: Vec<&str> = info_str.trim().split(',').collect();
 
     let (width, height, fps) = if parts.len() >= 3 {
-        let w = parts[0].parse().unwrap_or(0);
-        let h = parts[1].parse().unwrap_or(0);
+        let w = parts[0]
+            .parse()
+            .map_err(|e| format!("解析视频宽度失败: {}", e))?;
+        let h = parts[1]
+            .parse()
+            .map_err(|e| format!("解析视频高度失败: {}", e))?;
         let fps_str = parts[2];
         let fps = if fps_str.contains('/') {
             let fps_parts: Vec<&str> = fps_str.split('/').collect();
@@ -282,44 +300,57 @@ pub async fn cut_video_precise(
         let pid = child.id();
         *FFMPEG_PROCESS.lock().unwrap() = Some(pid);
 
-        let stdout = child.stdout.take().unwrap();
-        let reader = BufReader::new(stdout);
+        let cut_result = (|| -> Result<bool, String> {
+            let stdout = child.stdout.take().ok_or_else(|| "无法读取 ffmpeg 输出".to_string())?;
+            let reader = BufReader::new(stdout);
 
-        for line in reader.lines().map_while(Result::ok) {
+            for line in reader.lines().map_while(Result::ok) {
+                if cancelled.load(Ordering::SeqCst) {
+                    info!("[截取] 用户取消操作，终止 FFmpeg 进程");
+                    let _ = child.kill();
+                    break;
+                }
+
+                if let Some(time_str) = line.strip_prefix("out_time_ms=") {
+                    if let Ok(ms) = time_str.parse::<i64>() {
+                        let current = ms as f64 / 1_000_000.0;
+                        let progress = (current / duration * 100.0).min(100.0).max(0.0);
+                        let _ = app.emit("video-progress", progress);
+                    }
+                } else if let Some(time_str) = line.strip_prefix("out_time_us=") {
+                    if let Ok(us) = time_str.parse::<i64>() {
+                        let current = us as f64 / 1_000_000.0;
+                        let progress = (current / duration * 100.0).min(100.0).max(0.0);
+                        let _ = app.emit("video-progress", progress);
+                    }
+                } else if let Some(time_str) = line.strip_prefix("out_time=") {
+                    if let Some(secs) = parse_ffmpeg_time(time_str) {
+                        let progress = (secs / duration * 100.0).min(100.0).max(0.0);
+                        let _ = app.emit("video-progress", progress);
+                    }
+                }
+            }
+
+            let status = child
+                .wait()
+                .map_err(|e| format!("等待 ffmpeg 失败: {}", e))?;
+
             if cancelled.load(Ordering::SeqCst) {
-                info!("[截取] 用户取消操作，终止 FFmpeg 进程");
-                let _ = child.kill();
+                let _ = std::fs::remove_file(&output_clone);
                 return Err("操作已取消".to_string());
             }
 
-            if let Some(time_str) = line.strip_prefix("out_time_ms=") {
-                if let Ok(ms) = time_str.parse::<i64>() {
-                    let current = ms as f64 / 1_000_000.0;
-                    let progress = (current / duration * 100.0).min(100.0).max(0.0);
-                    let _ = app.emit("video-progress", progress);
-                }
-            } else if let Some(time_str) = line.strip_prefix("out_time_us=") {
-                if let Ok(us) = time_str.parse::<i64>() {
-                    let current = us as f64 / 1_000_000.0;
-                    let progress = (current / duration * 100.0).min(100.0).max(0.0);
-                    let _ = app.emit("video-progress", progress);
-                }
-            } else if let Some(time_str) = line.strip_prefix("out_time=") {
-                if let Some(secs) = parse_ffmpeg_time(time_str) {
-                    let progress = (secs / duration * 100.0).min(100.0).max(0.0);
-                    let _ = app.emit("video-progress", progress);
-                }
+            if !status.success() {
+                let _ = std::fs::remove_file(&output_clone);
+                return Err("视频截取失败".into());
             }
-        }
+
+            let _ = app.emit("video-progress", 100.0);
+            Ok(true)
+        })();
 
         *FFMPEG_PROCESS.lock().unwrap() = None;
-
-        let status = child
-            .wait()
-            .map_err(|e| format!("等待 ffmpeg 失败: {}", e))?;
-        let _ = app.emit("video-progress", 100.0);
-
-        Ok::<bool, String>(status.success())
+        cut_result
     })
     .await
     .map_err(|e| format!("任务执行失败: {}", e))??;

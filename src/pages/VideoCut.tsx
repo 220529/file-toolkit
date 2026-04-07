@@ -1,7 +1,17 @@
-import { useState, useEffect, useRef } from "react";
+import { useEffect, useRef, useState, type PointerEvent as ReactPointerEvent } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { open, save } from "@tauri-apps/plugin-dialog";
-import { listen } from "@tauri-apps/api/event";
+import { useTaskReporter } from "../components/TaskCenter";
+import { useToast } from "../components/Toast";
+import { Badge } from "../components/ui/badge";
+import { Button } from "../components/ui/button";
+import { Card, CardContent, CardHeader, CardTitle } from "../components/ui/card";
+import { Input } from "../components/ui/input";
+import { Progress } from "../components/ui/progress";
+import { useWindowDrop } from "../hooks/useWindowDrop";
+import { cn } from "../utils/cn";
+import { safeListen } from "../utils/tauriEvent";
+import { getBaseName, getExtension, stripExtension } from "../utils/path";
 
 interface VideoInfo {
   duration: number;
@@ -10,8 +20,33 @@ interface VideoInfo {
   fps: number;
 }
 
-interface DragDropPayload {
-  paths: string[];
+type TimelineDragMode = "playhead" | "start" | "end";
+
+function formatTime(seconds: number) {
+  const h = Math.floor(seconds / 3600);
+  const m = Math.floor((seconds % 3600) / 60);
+  const s = Math.floor(seconds % 60);
+  const ms = Math.floor((seconds % 1) * 10);
+  if (h > 0) {
+    return `${h}:${m.toString().padStart(2, "0")}:${s.toString().padStart(2, "0")}.${ms}`;
+  }
+  return `${m}:${s.toString().padStart(2, "0")}.${ms}`;
+}
+
+function parseTimeInput(value: string) {
+  const parts = value.split(":").map((part) => parseFloat(part) || 0);
+  if (parts.length === 3) return parts[0] * 3600 + parts[1] * 60 + parts[2];
+  if (parts.length === 2) return parts[0] * 60 + parts[1];
+  return parts[0] || 0;
+}
+
+function clamp(value: number, min: number, max: number) {
+  return Math.min(max, Math.max(min, value));
+}
+
+function getMinClipDuration(duration: number) {
+  if (duration <= 0) return 0.1;
+  return Math.min(0.1, duration);
 }
 
 export default function VideoCut({ active = true }: { active?: boolean }) {
@@ -21,147 +56,296 @@ export default function VideoCut({ active = true }: { active?: boolean }) {
   const [endTime, setEndTime] = useState(0);
   const [processing, setProcessing] = useState(false);
   const [preciseMode, setPreciseMode] = useState(false);
-  const [dragging, setDragging] = useState(false);
-  
-  // 预览相关
-  const [previewFrame, setPreviewFrame] = useState<string>("");
+  const [previewFrame, setPreviewFrame] = useState("");
   const [timelineFrames, setTimelineFrames] = useState<string[]>([]);
   const [loadingPreview, setLoadingPreview] = useState(false);
   const [currentPreviewTime, setCurrentPreviewTime] = useState(0);
   const previewTimeoutRef = useRef<number | null>(null);
-  
-  // 时间输入框状态（独立管理，避免编辑时被格式化干扰）
+  const loadRequestIdRef = useRef(0);
+  const previewRequestIdRef = useRef(0);
+  const timelineRequestIdRef = useRef(0);
+  const timelineRef = useRef<HTMLDivElement | null>(null);
+  const [timelineDragMode, setTimelineDragMode] = useState<TimelineDragMode | null>(null);
+  const videoInfoRef = useRef<VideoInfo | null>(null);
+  const videoPathRef = useRef("");
+  const startTimeRef = useRef(0);
+  const endTimeRef = useRef(0);
   const [startTimeInput, setStartTimeInput] = useState("");
   const [endTimeInput, setEndTimeInput] = useState("");
   const [editingStart, setEditingStart] = useState(false);
   const [editingEnd, setEditingEnd] = useState(false);
-  
-  // 进度相关
   const [progress, setProgress] = useState(0);
+  const toast = useToast();
+  const task = useTaskReporter("video-cut");
+  videoInfoRef.current = videoInfo;
+  videoPathRef.current = videoPath;
+  startTimeRef.current = startTime;
+  endTimeRef.current = endTime;
+  const { dragging } = useWindowDrop({
+    active,
+    onDrop: (paths) => {
+      const file = paths[0];
+      const ext = getExtension(file).toLowerCase();
+      if (["mp4", "mov", "avi", "mkv", "wmv", "flv", "webm"].includes(ext)) {
+        void loadVideo(file);
+      }
+    },
+  });
 
-  // 监听拖拽事件
   useEffect(() => {
-    // 非激活状态不监听
-    if (!active) {
-      setDragging(false);
+    if (!active) return;
+
+    return safeListen<number>("video-progress", (event) => {
+      setProgress(event.payload);
+    });
+  }, [active]);
+
+  useEffect(() => {
+    if (!processing) {
+      task.clearTask();
       return;
     }
 
-    const unlistenEnter = listen<DragDropPayload>("tauri://drag-enter", () => {
-      setDragging(true);
+    task.reportTask({
+      title: "视频截取",
+      stage: preciseMode ? "精确模式处理中" : "快速截取处理中",
+      detail: videoPath ? getBaseName(videoPath) : "等待文件",
+      progress: preciseMode ? progress : undefined,
+      cancellable: preciseMode,
+      onCancel: preciseMode ? cancelCut : undefined,
     });
-    const unlistenLeave = listen("tauri://drag-leave", () => {
-      setDragging(false);
-    });
-    const unlistenDrop = listen<DragDropPayload>("tauri://drag-drop", (event) => {
-      setDragging(false);
-      if (!active) return;
-      const paths = event.payload.paths;
-      if (paths && paths.length > 0) {
-        const file = paths[0];
-        const ext = file.split(".").pop()?.toLowerCase();
-        if (["mp4", "mov", "avi", "mkv", "wmv", "flv", "webm"].includes(ext || "")) {
-          loadVideo(file);
-        }
-      }
-    });
+  }, [processing, preciseMode, progress, videoPath]);
 
-    return () => {
-      unlistenEnter.then((fn) => fn());
-      unlistenLeave.then((fn) => fn());
-      unlistenDrop.then((fn) => fn());
-    };
-  }, [active]);
-
-  // 监听视频处理进度
   useEffect(() => {
-    const unlisten = listen<number>("video-progress", (event) => {
-      setProgress(event.payload);
-    });
     return () => {
-      unlisten.then((fn) => fn());
+      clearPendingPreviewTimeout();
+      loadRequestIdRef.current += 1;
+      previewRequestIdRef.current += 1;
+      timelineRequestIdRef.current += 1;
     };
   }, []);
 
+  useEffect(() => {
+    if (!timelineDragMode) return;
+
+    const activeDragMode = timelineDragMode;
+
+    function handlePointerMove(event: PointerEvent) {
+      updateTimelineDrag(activeDragMode, event.clientX, false);
+    }
+
+    function handlePointerUp(event: PointerEvent) {
+      updateTimelineDrag(activeDragMode, event.clientX, true);
+      setTimelineDragMode(null);
+    }
+
+    window.addEventListener("pointermove", handlePointerMove);
+    window.addEventListener("pointerup", handlePointerUp);
+
+    return () => {
+      window.removeEventListener("pointermove", handlePointerMove);
+      window.removeEventListener("pointerup", handlePointerUp);
+    };
+  }, [timelineDragMode]);
+
+  function clearPendingPreviewTimeout() {
+    if (previewTimeoutRef.current) {
+      window.clearTimeout(previewTimeoutRef.current);
+      previewTimeoutRef.current = null;
+    }
+  }
+
+  function getTimelineTimeFromClientX(clientX: number) {
+    const info = videoInfoRef.current;
+    const timeline = timelineRef.current;
+    if (!info || !timeline) return 0;
+
+    const rect = timeline.getBoundingClientRect();
+    if (rect.width <= 0) return 0;
+
+    const ratio = clamp((clientX - rect.left) / rect.width, 0, 1);
+    return ratio * info.duration;
+  }
+
+  function updateTimelineDrag(mode: TimelineDragMode, clientX: number, finalize: boolean) {
+    const info = videoInfoRef.current;
+    const path = videoPathRef.current;
+    if (!info || !path) return;
+
+    const rawTime = getTimelineTimeFromClientX(clientX);
+    const minDuration = getMinClipDuration(info.duration);
+
+    if (mode === "start") {
+      const next = clamp(rawTime, 0, Math.max(0, endTimeRef.current - minDuration));
+      startTimeRef.current = next;
+      setStartTime(next);
+      endTimeRef.current = Math.max(endTimeRef.current, next);
+      setCurrentPreviewTime(next);
+      if (finalize) {
+        clearPendingPreviewTimeout();
+        void loadPreviewFrame(path, next);
+      } else {
+        updatePreviewDebounced(next);
+      }
+      return;
+    }
+
+    if (mode === "end") {
+      const next = clamp(rawTime, Math.min(info.duration, startTimeRef.current + minDuration), info.duration);
+      endTimeRef.current = next;
+      setEndTime(next);
+      setCurrentPreviewTime(next);
+      if (finalize) {
+        clearPendingPreviewTimeout();
+        void loadPreviewFrame(path, next);
+      } else {
+        updatePreviewDebounced(next);
+      }
+      return;
+    }
+
+    const next = clamp(rawTime, 0, info.duration);
+    setCurrentPreviewTime(next);
+    if (finalize) {
+      clearPendingPreviewTimeout();
+      void loadPreviewFrame(path, next);
+    } else {
+      updatePreviewDebounced(next);
+    }
+  }
+
+  function beginTimelineDrag(mode: TimelineDragMode, clientX: number) {
+    clearPendingPreviewTimeout();
+    setTimelineDragMode(mode);
+    updateTimelineDrag(mode, clientX, false);
+  }
+
+  function applyCurrentFrameToStart() {
+    startTimeRef.current = currentPreviewTime;
+    setStartTime(currentPreviewTime);
+    if (currentPreviewTime > endTime) {
+      endTimeRef.current = currentPreviewTime;
+      setEndTime(currentPreviewTime);
+    }
+  }
+
+  function applyCurrentFrameToEnd() {
+    endTimeRef.current = currentPreviewTime;
+    setEndTime(currentPreviewTime);
+    if (currentPreviewTime < startTime) {
+      startTimeRef.current = currentPreviewTime;
+      setStartTime(currentPreviewTime);
+    }
+  }
+
+  function handleTimelinePointerDown(event: ReactPointerEvent<HTMLDivElement>) {
+    if (!videoInfo) return;
+    beginTimelineDrag("playhead", event.clientX);
+  }
+
+  function handleTimelineHandlePointerDown(mode: TimelineDragMode, event: ReactPointerEvent<HTMLButtonElement>) {
+    event.stopPropagation();
+    beginTimelineDrag(mode, event.clientX);
+  }
+
   async function loadVideo(path: string) {
+    const loadRequestId = ++loadRequestIdRef.current;
+    previewRequestIdRef.current += 1;
+    timelineRequestIdRef.current += 1;
+    clearPendingPreviewTimeout();
+
     setVideoPath(path);
+    setVideoInfo(null);
     setPreviewFrame("");
     setTimelineFrames([]);
-    
+    setCurrentPreviewTime(0);
+    setProgress(0);
     try {
       const info = await invoke<VideoInfo>("get_video_info", { path });
+      if (loadRequestIdRef.current !== loadRequestId) return;
       setVideoInfo(info);
+      startTimeRef.current = 0;
+      endTimeRef.current = info.duration;
       setStartTime(0);
       setEndTime(info.duration);
       setCurrentPreviewTime(0);
-      
-      // 生成初始预览帧
-      loadPreviewFrame(path, 0);
-      
-      // 生成时间轴缩略图
-      loadTimelineFrames(path);
+      await loadPreviewFrame(path, 0);
+      if (loadRequestIdRef.current !== loadRequestId) return;
+      void loadTimelineFrames(path);
     } catch (e) {
-      alert("获取视频信息失败: " + e);
+      if (loadRequestIdRef.current !== loadRequestId) return;
+      setVideoPath("");
+      setVideoInfo(null);
+      setPreviewFrame("");
+      setTimelineFrames([]);
+      setCurrentPreviewTime(0);
+      toast.error("获取视频信息失败: " + e);
     }
   }
 
   async function loadPreviewFrame(path: string, time: number) {
+    const requestId = ++previewRequestIdRef.current;
     setLoadingPreview(true);
     try {
       const frame = await invoke<string>("generate_preview_frame", { path, time });
+      if (previewRequestIdRef.current !== requestId) return;
       setPreviewFrame(frame);
       setCurrentPreviewTime(time);
     } catch (e) {
+      if (previewRequestIdRef.current !== requestId) return;
       console.error("生成预览帧失败:", e);
     } finally {
-      setLoadingPreview(false);
+      if (previewRequestIdRef.current === requestId) {
+        setLoadingPreview(false);
+      }
     }
   }
 
   async function loadTimelineFrames(path: string) {
+    const requestId = ++timelineRequestIdRef.current;
     try {
       const frames = await invoke<string[]>("generate_timeline_frames", { path, count: 8 });
+      if (timelineRequestIdRef.current !== requestId) return;
       setTimelineFrames(frames);
     } catch (e) {
+      if (timelineRequestIdRef.current !== requestId) return;
       console.error("生成时间轴失败:", e);
     }
   }
 
-  // 防抖更新预览帧
   function updatePreviewDebounced(time: number) {
-    if (previewTimeoutRef.current) {
-      clearTimeout(previewTimeoutRef.current);
-    }
+    clearPendingPreviewTimeout();
     previewTimeoutRef.current = window.setTimeout(() => {
+      previewTimeoutRef.current = null;
       if (videoPath) {
-        loadPreviewFrame(videoPath, time);
+        void loadPreviewFrame(videoPath, time);
       }
-    }, 300);
+    }, 240);
   }
 
   async function selectVideo() {
     const file = await open({
       title: "选择视频文件",
-      filters: [
-        { name: "视频文件", extensions: ["mp4", "mov", "avi", "mkv", "wmv", "flv", "webm"] },
-      ],
+      filters: [{ name: "视频文件", extensions: ["mp4", "mov", "avi", "mkv", "wmv", "flv", "webm"] }],
     });
     if (file && typeof file === "string") {
-      loadVideo(file);
+      await loadVideo(file);
     }
   }
 
   async function handleCut() {
-    if (!videoPath || !videoInfo) return;
+    const currentVideoPath = videoPathRef.current;
+    const currentVideoInfo = videoInfoRef.current;
+    const currentStartTime = startTimeRef.current;
+    const currentEndTime = endTimeRef.current;
 
-    const ext = videoPath.split(".").pop() || "mp4";
-    const baseName = videoPath.split("/").pop()?.replace(/\.[^.]+$/, "") || "video";
-    const timestamp = Date.now();
-    const defaultName = `${baseName}-${timestamp}.${ext}`;
+    if (!currentVideoPath || !currentVideoInfo) return;
 
+    const ext = getExtension(currentVideoPath) || "mp4";
+    const baseName = stripExtension(getBaseName(currentVideoPath)) || "video";
     const outputPath = await save({
       title: "保存截取的视频",
-      defaultPath: defaultName,
+      defaultPath: `${baseName}-${Date.now()}.${ext}`,
       filters: [{ name: "视频文件", extensions: [ext, "mp4"] }],
     });
     if (!outputPath) return;
@@ -169,18 +353,20 @@ export default function VideoCut({ active = true }: { active?: boolean }) {
     setProcessing(true);
     setProgress(0);
     try {
-      const cmd = preciseMode ? "cut_video_precise" : "cut_video";
-      await invoke(cmd, {
-        input: videoPath,
+      const command = preciseMode ? "cut_video_precise" : "cut_video";
+      await invoke(command, {
+        input: currentVideoPath,
         output: outputPath,
-        startTime,
-        endTime,
+        startTime: currentStartTime,
+        endTime: currentEndTime,
       });
-      alert("截取完成！");
+      toast.success("截取完成");
     } catch (e) {
-      const msg = String(e);
-      if (!msg.includes("取消")) {
-        alert("截取失败: " + e);
+      const message = String(e);
+      if (!message.includes("取消")) {
+        toast.error("截取失败: " + e);
+      } else {
+        toast.info("已取消截取");
       }
     } finally {
       setProcessing(false);
@@ -192,345 +378,288 @@ export default function VideoCut({ active = true }: { active?: boolean }) {
     await invoke("cancel_video_cut");
     setProcessing(false);
     setProgress(0);
-  }  function formatTime(seconds: number): string {
-    const h = Math.floor(seconds / 3600);
-    const m = Math.floor((seconds % 3600) / 60);
-    const s = Math.floor(seconds % 60);
-    const ms = Math.floor((seconds % 1) * 10);
-    if (h > 0) {
-      return `${h}:${m.toString().padStart(2, "0")}:${s.toString().padStart(2, "0")}.${ms}`;
-    }
-    return `${m}:${s.toString().padStart(2, "0")}.${ms}`;
-  }
-
-  function parseTimeInput(str: string): number {
-    const parts = str.split(":").map((p) => parseFloat(p) || 0);
-    if (parts.length === 3) {
-      return parts[0] * 3600 + parts[1] * 60 + parts[2];
-    } else if (parts.length === 2) {
-      return parts[0] * 60 + parts[1];
-    }
-    return parts[0] || 0;
   }
 
   const clipDuration = Math.max(0, endTime - startTime);
+  const timelineStartPercent = videoInfo ? (startTime / videoInfo.duration) * 100 : 0;
+  const timelineEndPercent = videoInfo ? (endTime / videoInfo.duration) * 100 : 0;
 
   return (
-    <div className="p-6 space-y-6">
+    <div className="space-y-6 p-6">
       {!videoPath ? (
-        <div className="card p-6">
-          <div
-            onClick={selectVideo}
-            className={`drop-zone ${dragging ? "dragging" : ""}`}
-          >
-            <div className="text-5xl mb-4">{dragging ? "📂" : "🎬"}</div>
-            <div className="text-base text-gray-600 mb-2">
-              {dragging ? "松开以选择视频" : "拖入视频文件 或 点击选择"}
-            </div>
-            <div className="text-sm text-gray-400">
-              支持 MP4、MOV、AVI、MKV 等格式
-            </div>
-          </div>
-        </div>
+        <>
+          <Card className="overflow-hidden">
+            <CardContent className="px-5 py-5">
+              <div
+                onClick={selectVideo}
+                className={cn("drop-zone flex flex-col items-center justify-center", dragging && "dragging")}
+              >
+                <div className="mb-4 flex h-16 w-16 items-center justify-center rounded-[22px] bg-white text-3xl shadow-[0_16px_34px_rgba(15,23,42,0.08)]">
+                  {dragging ? "📂" : "🎬"}
+                </div>
+                <div className="text-lg font-semibold text-slate-900">{dragging ? "松开以载入视频" : "拖入视频，或点击选择"}</div>
+              </div>
+            </CardContent>
+          </Card>
+        </>
       ) : (
         <>
-          {/* 视频预览区域 */}
-          <div className="card overflow-hidden">
-            <div className="bg-black relative" style={{ minHeight: "300px" }}>
-              {previewFrame ? (
-                <img
-                  src={previewFrame}
-                  alt="视频预览"
-                  className="w-full h-auto max-h-[400px] object-contain mx-auto"
-                />
-              ) : (
-                <div className="flex items-center justify-center h-[300px] text-gray-500">
-                  {loadingPreview ? "⏳ 加载预览中..." : "🎬 视频预览"}
-                </div>
-              )}
-              {loadingPreview && previewFrame && (
-                <div className="absolute top-2 right-2 bg-black/50 text-white px-2 py-1 rounded text-sm">
-                  ⏳ 更新中...
-                </div>
-              )}
-              {/* 当前预览时间 */}
-              <div className="absolute bottom-2 left-2 bg-black/70 text-white px-3 py-1 rounded text-sm font-mono">
-                {formatTime(currentPreviewTime)}
-              </div>
-              {/* 更换按钮 */}
-              <button
-                onClick={selectVideo}
-                className="absolute top-2 left-2 bg-black/50 hover:bg-black/70 text-white px-3 py-1 rounded text-sm"
-              >
-                🔄 更换视频
-              </button>
-            </div>
-
-            {/* 时间轴缩略图 */}
-            {timelineFrames.length > 0 && (
-              <div className="bg-gray-900 p-2">
-                <div className="flex gap-1">
-                  {timelineFrames.map((frame, i) => {
-                    const frameTime = videoInfo ? (videoInfo.duration / (timelineFrames.length + 1)) * (i + 1) : 0;
-                    return (
-                      <div
-                        key={i}
-                        className="flex-1 cursor-pointer hover:opacity-80 transition-opacity relative group"
-                        onClick={() => {
-                          setCurrentPreviewTime(frameTime);
-                          loadPreviewFrame(videoPath, frameTime);
-                        }}
-                      >
-                        <img src={frame} alt="" className="w-full h-12 object-cover rounded" />
-                        <div className="absolute bottom-0 left-0 right-0 bg-black/60 text-white text-xs text-center opacity-0 group-hover:opacity-100 transition-opacity">
-                          {formatTime(frameTime)}
-                        </div>
-                      </div>
-                    );
-                  })}
-                </div>
-              </div>
-            )}
-
-            {/* 视频信息 */}
-            {videoInfo && (
-              <div className="p-3 bg-gray-50 flex items-center justify-between text-sm text-gray-600">
-                <span className="truncate flex-1" title={videoPath}>
-                  📁 {videoPath.split("/").pop()}
-                </span>
-                <div className="flex gap-4 ml-4">
-                  <span>📐 {videoInfo.width}×{videoInfo.height}</span>
-                  <span>⏱️ {formatTime(videoInfo.duration)}</span>
-                  <span>🎞️ {videoInfo.fps.toFixed(1)}fps</span>
-                </div>
-              </div>
-            )}
-          </div>
-
-          {/* 时间选择滑块 */}
           {videoInfo && (
-            <div className="card p-4">
-              <div className="mb-4">
-                <div className="text-sm text-gray-500 mb-2">预览位置（拖动查看不同时间点）</div>
-                <input
-                  type="range"
-                  min={0}
-                  max={videoInfo.duration}
-                  step={0.1}
-                  value={currentPreviewTime}
-                  onChange={(e) => {
-                    const t = parseFloat(e.target.value);
-                    setCurrentPreviewTime(t);
-                    updatePreviewDebounced(t);
-                  }}
-                  className="w-full"
-                />
-              </div>
-              
-              {/* 截取范围可视化 */}
-              <div className="relative h-8 bg-gray-200 rounded-lg mb-4 overflow-hidden">
-                {/* 时间轴背景 */}
-                {timelineFrames.length > 0 && (
-                  <div className="absolute inset-0 flex">
-                    {timelineFrames.map((frame, i) => (
-                      <div key={i} className="flex-1">
-                        <img src={frame} alt="" className="w-full h-full object-cover opacity-50" />
-                      </div>
-                    ))}
-                  </div>
-                )}
-                {/* 选中区域 */}
-                <div
-                  className="absolute h-full bg-blue-500/60 border-x-2 border-blue-600"
-                  style={{
-                    left: `${(startTime / videoInfo.duration) * 100}%`,
-                    width: `${(clipDuration / videoInfo.duration) * 100}%`,
-                  }}
-                />
-                {/* 当前预览位置 */}
-                <div
-                  className="absolute w-0.5 h-full bg-yellow-400"
-                  style={{ left: `${(currentPreviewTime / videoInfo.duration) * 100}%` }}
-                />
-              </div>
-            </div>
+            <Card>
+              <CardContent className="flex flex-wrap items-center gap-x-6 gap-y-2 px-5 py-4 text-sm">
+                <div className="flex items-center gap-2">
+                  <span className="text-slate-400">总时长</span>
+                  <span className="font-medium text-slate-900">{formatTime(videoInfo.duration)}</span>
+                </div>
+                <div className="flex items-center gap-2">
+                  <span className="text-slate-400">当前片段</span>
+                  <span className="font-medium text-slate-900">{formatTime(clipDuration)}</span>
+                </div>
+                <div className="flex items-center gap-2">
+                  <span className="text-slate-400">画面规格</span>
+                  <span className="font-medium text-slate-900">{videoInfo.width}×{videoInfo.height}</span>
+                </div>
+              </CardContent>
+            </Card>
           )}
 
-          {/* 截取控制 */}
-          <div className="card p-6">
-            <div className="grid grid-cols-3 gap-8 mb-6">
-              <div>
-                <div className="text-sm text-gray-500 mb-2 text-center">开始时间</div>
-                <input
-                  type="text"
-                  value={editingStart ? startTimeInput : formatTime(startTime)}
-                  onFocus={() => {
-                    setEditingStart(true);
-                    setStartTimeInput(formatTime(startTime));
-                  }}
-                  onChange={(e) => setStartTimeInput(e.target.value)}
-                  onBlur={() => {
-                    setEditingStart(false);
-                    const t = parseTimeInput(startTimeInput);
-                    if (t >= 0 && t <= (videoInfo?.duration || 0)) {
-                      setStartTime(t);
-                      if (t > endTime) setEndTime(t);
-                      // 跳转到该时间点预览
-                      loadPreviewFrame(videoPath, t);
-                    }
-                  }}
-                  onKeyDown={(e) => {
-                    if (e.key === "Enter") {
-                      (e.target as HTMLInputElement).blur();
-                    }
-                  }}
-                  placeholder="0:00"
-                  className="w-full text-center text-2xl font-mono text-green-600 border-2 border-green-200 rounded-lg p-3 focus:border-green-500 focus:outline-none"
-                />
-                {videoInfo && (
-                  <input
-                    type="range"
-                    min={0}
-                    max={videoInfo.duration}
-                    step={0.1}
-                    value={startTime}
-                    onChange={(e) => {
-                      const v = parseFloat(e.target.value);
-                      setStartTime(v);
-                      if (v > endTime) setEndTime(v);
-                      updatePreviewDebounced(v);
-                    }}
-                    className="w-full mt-2"
-                  />
-                )}
-                <button
-                  onClick={() => {
-                    setStartTime(currentPreviewTime);
-                  }}
-                  className="w-full mt-2 text-sm text-green-600 hover:bg-green-50 py-1 rounded"
-                >
-                  ⬆️ 设为当前位置
-                </button>
-              </div>
-
-              <div>
-                <div className="text-sm text-gray-500 mb-2 text-center">截取时长</div>
-                <div className="text-center text-2xl font-mono text-blue-600 border-2 border-blue-200 rounded-lg p-3 bg-blue-50">
-                  {formatTime(clipDuration)}
+          <div className="grid gap-6 xl:grid-cols-[minmax(0,1.55fr)_380px]">
+            <Card className="overflow-hidden">
+              <CardHeader>
+                <div>
+                  <CardTitle>预览与时间轴</CardTitle>
+                  <div className="mt-1 text-sm text-slate-500">{getBaseName(videoPath)}</div>
                 </div>
-                <div className="text-center text-xs text-gray-400 mt-2">
-                  {clipDuration > 0 ? `约 ${Math.round(clipDuration)} 秒` : "请设置时间范围"}
+                <div className="flex items-center gap-2">
+                  <Badge tone="info">{preciseMode ? "精确模式" : "快速模式"}</Badge>
+                  <Button variant="secondary" size="sm" onClick={selectVideo}>
+                    更换视频
+                  </Button>
                 </div>
-              </div>
+              </CardHeader>
+              <CardContent className="space-y-4">
+                <div className="overflow-hidden rounded-[24px] bg-slate-950">
+                  <div className="relative flex min-h-[360px] items-center justify-center px-4 py-4">
+                    {previewFrame ? (
+                      <img src={previewFrame} alt="视频预览" className="max-h-[420px] w-full object-contain" />
+                    ) : (
+                      <div className="text-sm text-slate-400">{loadingPreview ? "加载预览中…" : "等待生成预览"}</div>
+                    )}
+                    <div className="absolute bottom-4 left-4 rounded-full bg-slate-950/80 px-3 py-1 text-xs font-medium text-white">
+                      {formatTime(currentPreviewTime)}
+                    </div>
+                    {loadingPreview && previewFrame && (
+                      <div className="absolute right-4 top-4 rounded-full bg-slate-950/72 px-3 py-1 text-xs text-white">
+                        更新中…
+                      </div>
+                    )}
+                  </div>
 
-              <div>
-                <div className="text-sm text-gray-500 mb-2 text-center">结束时间</div>
-                <input
-                  type="text"
-                  value={editingEnd ? endTimeInput : formatTime(endTime)}
-                  onFocus={() => {
-                    setEditingEnd(true);
-                    setEndTimeInput(formatTime(endTime));
-                  }}
-                  onChange={(e) => setEndTimeInput(e.target.value)}
-                  onBlur={() => {
-                    setEditingEnd(false);
-                    const t = parseTimeInput(endTimeInput);
-                    if (t >= 0 && t <= (videoInfo?.duration || 0)) {
-                      setEndTime(t);
-                      if (t < startTime) setStartTime(t);
-                      // 跳转到该时间点预览
-                      loadPreviewFrame(videoPath, t);
-                    }
-                  }}
-                  onKeyDown={(e) => {
-                    if (e.key === "Enter") {
-                      (e.target as HTMLInputElement).blur();
-                    }
-                  }}
-                  placeholder="0:00"
-                  className="w-full text-center text-2xl font-mono text-red-600 border-2 border-red-200 rounded-lg p-3 focus:border-red-500 focus:outline-none"
-                />
-                {videoInfo && (
-                  <input
-                    type="range"
-                    min={0}
-                    max={videoInfo.duration}
-                    step={0.1}
-                    value={endTime}
-                    onChange={(e) => {
-                      const v = parseFloat(e.target.value);
-                      setEndTime(v);
-                      if (v < startTime) setStartTime(v);
-                      updatePreviewDebounced(v);
-                    }}
-                    className="w-full mt-2"
-                  />
-                )}
-                <button
-                  onClick={() => {
-                    setEndTime(currentPreviewTime);
-                  }}
-                  className="w-full mt-2 text-sm text-red-600 hover:bg-red-50 py-1 rounded"
-                >
-                  ⬆️ 设为当前位置
-                </button>
-              </div>
-            </div>
+                  {timelineFrames.length > 0 && videoInfo && (
+                    <div className="border-t border-white/10 px-3 py-3">
+                      <div className="mb-2 flex flex-wrap items-center justify-between gap-2">
+                        <div className="text-[11px] text-slate-400">缩略帧</div>
+                        <div className="flex flex-wrap items-center gap-2">
+                          <Button variant="ghost" size="sm" className="h-7 px-2.5 text-[11px]" onClick={applyCurrentFrameToStart}>
+                            设起点
+                          </Button>
+                          <Button variant="ghost" size="sm" className="h-7 px-2.5 text-[11px]" onClick={applyCurrentFrameToEnd}>
+                            设终点
+                          </Button>
+                        </div>
+                      </div>
+                      <div className="flex gap-2 overflow-x-auto pb-1">
+                        {timelineFrames.map((frame, index) => {
+                          const frameTime = (videoInfo.duration / (timelineFrames.length + 1)) * (index + 1);
+                          const activeFrame = Math.abs(frameTime - currentPreviewTime) <= videoInfo.duration / (timelineFrames.length + 1) / 2;
+                          return (
+                            <button
+                              key={index}
+                              className={cn(
+                                "group min-w-[92px] overflow-hidden rounded-xl border bg-slate-900/70 text-left transition",
+                                activeFrame ? "border-amber-300/80 ring-1 ring-amber-300/40" : "border-white/10 hover:border-white/20"
+                              )}
+                              onClick={() => {
+                                clearPendingPreviewTimeout();
+                                setCurrentPreviewTime(frameTime);
+                                void loadPreviewFrame(videoPath, frameTime);
+                              }}
+                            >
+                              <img src={frame} alt="" className="h-12 w-full object-cover transition group-hover:opacity-100" />
+                              <div className="px-2 py-1 text-[10px] text-slate-300">{formatTime(frameTime)}</div>
+                            </button>
+                          );
+                        })}
+                      </div>
+                    </div>
+                  )}
 
-            <div className="flex items-center justify-between pt-4 border-t">
-              <label className="flex items-center gap-2 text-sm text-gray-600">
-                <input
-                  type="checkbox"
-                  checked={preciseMode}
-                  onChange={(e) => setPreciseMode(e.target.checked)}
-                  className="w-4 h-4"
-                />
-                精确模式（重新编码，较慢但时间精确）
-              </label>
-
-              <button
-                onClick={handleCut}
-                disabled={processing || clipDuration <= 0}
-                className="btn btn-primary px-8"
-              >
-                {processing ? "⏳ 处理中..." : "✂️ 开始截取"}
-              </button>
-            </div>
-
-            {/* 处理进度条 */}
-            {processing && preciseMode && (
-              <div className="mt-4 pt-4 border-t">
-                <div className="flex items-center justify-between mb-2">
-                  <span className="text-sm text-gray-600">正在编码...</span>
-                  <div className="flex items-center gap-4">
-                    <span className="text-sm font-mono text-blue-600">
-                      {progress.toFixed(1)}%
-                    </span>
-                    <button
-                      onClick={cancelCut}
-                      className="text-sm text-red-500 hover:text-red-700"
+                  <div className="border-t border-white/10 px-3 py-3">
+                    <div className="mb-2 flex items-center justify-between text-[11px] text-slate-400">
+                      <span>拖动两端调整范围，点击时间轴切换预览帧。</span>
+                      <span>{formatTime(startTime)} - {formatTime(endTime)}</span>
+                    </div>
+                    <div
+                      ref={timelineRef}
+                      className="relative h-14 overflow-hidden rounded-2xl border border-white/10 bg-[linear-gradient(180deg,rgba(15,23,42,0.82),rgba(30,41,59,0.92))] select-none touch-none"
+                      onPointerDown={handleTimelinePointerDown}
                     >
-                      ✕ 取消
-                    </button>
+                      <div className="absolute inset-0 bg-[linear-gradient(90deg,rgba(51,109,255,0.12),rgba(255,255,255,0.02),rgba(51,109,255,0.12))]" />
+
+                      <div className="absolute inset-y-0 left-0 bg-slate-950/60" style={{ width: `${timelineStartPercent}%` }} />
+                      <div className="absolute inset-y-0 right-0 bg-slate-950/60" style={{ width: `${100 - timelineEndPercent}%` }} />
+                      <div
+                        className="absolute inset-y-0 border-x border-[rgba(147,197,253,0.9)] bg-[rgba(59,130,246,0.22)]"
+                        style={{
+                          left: `${timelineStartPercent}%`,
+                          width: `${Math.max(0, timelineEndPercent - timelineStartPercent)}%`,
+                        }}
+                      />
+
+                      <button
+                        className="absolute inset-y-0 z-20 w-6 -translate-x-1/2 cursor-ew-resize"
+                        style={{ left: `${timelineStartPercent}%` }}
+                        onPointerDown={(event) => handleTimelineHandlePointerDown("start", event)}
+                        aria-label="调整开始时间"
+                      >
+                        <span className="absolute left-1/2 top-1 h-4 w-2 -translate-x-1/2 bg-[var(--brand-500)] [clip-path:polygon(50%_100%,0_0,100%_0)] drop-shadow-[0_4px_8px_rgba(15,23,42,0.28)]" />
+                      </button>
+                      <button
+                        className="absolute inset-y-0 z-20 w-6 -translate-x-1/2 cursor-ew-resize"
+                        style={{ left: `${timelineEndPercent}%` }}
+                        onPointerDown={(event) => handleTimelineHandlePointerDown("end", event)}
+                        aria-label="调整结束时间"
+                      >
+                        <span className="absolute left-1/2 top-1 h-4 w-2 -translate-x-1/2 bg-rose-400 [clip-path:polygon(50%_100%,0_0,100%_0)] drop-shadow-[0_4px_8px_rgba(15,23,42,0.28)]" />
+                      </button>
+                    </div>
+                    <div className="mt-2 grid grid-cols-3 text-[11px] text-slate-400">
+                      <span>开始 {formatTime(startTime)}</span>
+                      <span className="text-center">片段 {formatTime(clipDuration)}</span>
+                      <span className="text-right">结束 {formatTime(endTime)}</span>
+                    </div>
                   </div>
                 </div>
-                <div className="h-2 bg-gray-200 rounded-full overflow-hidden">
-                  <div
-                    className="h-full bg-blue-500 transition-all duration-300"
-                    style={{ width: `${progress}%` }}
-                  />
-                </div>
-              </div>
-            )}
-          </div>
+              </CardContent>
+            </Card>
 
-          <div className="card p-4 bg-blue-50 border border-blue-200">
-            <div className="text-sm text-blue-700">
-              💡 <strong>提示：</strong>
-              拖动预览滑块查看不同时间点的画面，点击时间轴缩略图快速跳转。
-              使用"设为当前位置"按钮可以精确设置开始/结束时间。
-            </div>
+            <Card>
+              <CardHeader>
+                <div>
+                  <CardTitle>截取参数</CardTitle>
+                </div>
+              </CardHeader>
+              <CardContent className="space-y-5">
+                <div className="grid gap-4">
+                  <div className="grid gap-3 md:grid-cols-3">
+                    <div>
+                      <div className="mb-2 text-sm font-medium text-slate-800">开始</div>
+                      <Input
+                        value={editingStart ? startTimeInput : formatTime(startTime)}
+                        onFocus={() => {
+                          setEditingStart(true);
+                          setStartTimeInput(formatTime(startTime));
+                        }}
+                        onChange={(event) => setStartTimeInput(event.target.value)}
+                        onBlur={() => {
+                          setEditingStart(false);
+                        const time = parseTimeInput(startTimeInput);
+                        if (time >= 0 && time <= (videoInfo?.duration || 0)) {
+                          clearPendingPreviewTimeout();
+                          startTimeRef.current = time;
+                          setStartTime(time);
+                          if (time > endTime) setEndTime(time);
+                          if (time > endTimeRef.current) endTimeRef.current = time;
+                          void loadPreviewFrame(videoPath, time);
+                        }
+                        }}
+                        onKeyDown={(event) => {
+                          if (event.key === "Enter") (event.target as HTMLInputElement).blur();
+                        }}
+                        className="font-mono"
+                      />
+                    </div>
+
+                    <div>
+                      <div className="mb-2 text-sm font-medium text-slate-800">时长</div>
+                      <div className="flex h-11 items-center rounded-xl border border-slate-200 bg-slate-50 px-3 font-mono text-sm text-slate-900">
+                        {formatTime(clipDuration)}
+                      </div>
+                    </div>
+
+                    <div>
+                      <div className="mb-2 text-sm font-medium text-slate-800">结束</div>
+                      <Input
+                        value={editingEnd ? endTimeInput : formatTime(endTime)}
+                        onFocus={() => {
+                          setEditingEnd(true);
+                          setEndTimeInput(formatTime(endTime));
+                        }}
+                        onChange={(event) => setEndTimeInput(event.target.value)}
+                        onBlur={() => {
+                          setEditingEnd(false);
+                        const time = parseTimeInput(endTimeInput);
+                        if (time >= 0 && time <= (videoInfo?.duration || 0)) {
+                          clearPendingPreviewTimeout();
+                          endTimeRef.current = time;
+                          setEndTime(time);
+                          if (time < startTime) setStartTime(time);
+                          if (time < startTimeRef.current) startTimeRef.current = time;
+                          void loadPreviewFrame(videoPath, time);
+                        }
+                        }}
+                        onKeyDown={(event) => {
+                          if (event.key === "Enter") (event.target as HTMLInputElement).blur();
+                        }}
+                        className="font-mono"
+                      />
+                    </div>
+                  </div>
+
+                  {videoInfo && (
+                    <div className="text-xs text-slate-400">
+                      拖动时间轴左手柄调整开始，右手柄调整结束。
+                    </div>
+                  )}
+                </div>
+
+                <div className="rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3">
+                  <label className="flex items-center gap-3 text-sm text-slate-600">
+                    <input
+                      type="checkbox"
+                      checked={preciseMode}
+                      onChange={(event) => setPreciseMode(event.target.checked)}
+                      className="h-4 w-4 rounded"
+                    />
+                    <span>
+                      <span className="font-medium text-slate-800">精确模式</span>
+                      <span className="ml-2 text-slate-500">更慢，但起止点更准。</span>
+                    </span>
+                  </label>
+                </div>
+
+                {processing && preciseMode && (
+                  <div className="space-y-2 rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3">
+                    <div className="flex items-center justify-between text-sm">
+                      <span className="text-slate-800">正在编码</span>
+                      <span className="font-mono text-[var(--brand-600)]">{progress.toFixed(1)}%</span>
+                    </div>
+                    <Progress value={progress} />
+                  </div>
+                )}
+
+                <div className="space-y-3 border-t border-slate-100 pt-4">
+                  <Button variant="primary" className="w-full" onClick={handleCut} disabled={processing || clipDuration <= 0}>
+                    {processing ? "处理中…" : "开始截取"}
+                  </Button>
+                  {processing && preciseMode && (
+                    <Button variant="danger" className="w-full" onClick={cancelCut}>
+                      取消截取
+                    </Button>
+                  )}
+                </div>
+              </CardContent>
+            </Card>
           </div>
         </>
       )}

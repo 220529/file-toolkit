@@ -1,7 +1,17 @@
-import { useState, useEffect } from "react";
+import { useEffect, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
-import { listen } from "@tauri-apps/api/event";
 import { open } from "@tauri-apps/plugin-dialog";
+import { useTaskReporter } from "../components/TaskCenter";
+import { useToast } from "../components/Toast";
+import { Badge } from "../components/ui/badge";
+import { Button } from "../components/ui/button";
+import { Card, CardContent, CardHeader, CardTitle } from "../components/ui/card";
+import { Progress } from "../components/ui/progress";
+import { useFileActions } from "../hooks/useFileActions";
+import { useWindowDrop } from "../hooks/useWindowDrop";
+import { cn } from "../utils/cn";
+import { safeListen } from "../utils/tauriEvent";
+import { getBaseName, getDirName, getExtension, getPathSeparator, joinPath, stripExtension } from "../utils/path";
 
 interface Props {
   active: boolean;
@@ -16,35 +26,45 @@ interface FileItem {
   path: string;
   name: string;
   sourceFormat: string;
-  size: number; // 原文件大小（字节）
+  size: number;
   status: FileStatus;
   progress: number;
   error?: string;
   outputPath?: string;
-  outputSize?: number; // 输出文件大小（字节）
-  duration?: number; // 耗时（秒）
-  startTime?: number; // 开始时间戳
+  outputSize?: number;
+  duration?: number;
+  startTime?: number;
 }
 
-// 格式化文件大小
-const formatSize = (bytes: number): string => {
+const FORMATS: { value: Format; label: string; hint: string }[] = [
+  { value: "mp4", label: "MP4", hint: "兼容性最好" },
+  { value: "mov", label: "MOV", hint: "适合剪辑流程" },
+  { value: "gif", label: "GIF", hint: "轻量动图" },
+];
+
+const QUALITIES: { value: Quality; label: string; hint: string }[] = [
+  { value: "high", label: "高画质", hint: "文件更大" },
+  { value: "medium", label: "均衡", hint: "默认推荐" },
+  { value: "low", label: "小文件", hint: "压缩更强" },
+];
+
+function formatSize(bytes: number) {
   if (bytes < 1024) return `${bytes} B`;
   if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
   if (bytes < 1024 * 1024 * 1024) return `${(bytes / 1024 / 1024).toFixed(1)} MB`;
   return `${(bytes / 1024 / 1024 / 1024).toFixed(2)} GB`;
-};
+}
 
-const FORMATS: { value: Format; label: string }[] = [
-  { value: "mp4", label: "MP4" },
-  { value: "mov", label: "MOV" },
-  { value: "gif", label: "GIF" },
-];
-
-const QUALITIES: { value: Quality; label: string }[] = [
-  { value: "high", label: "高画质" },
-  { value: "medium", label: "均衡" },
-  { value: "low", label: "小文件" },
-];
+function SummaryCard({ label, value }: { label: string; value: string }) {
+  return (
+    <Card>
+      <CardContent className="px-5 py-5">
+        <div className="text-xs uppercase tracking-[0.18em] text-slate-400">{label}</div>
+        <div className="mt-3 text-3xl font-semibold tracking-[-0.03em] text-slate-950">{value}</div>
+      </CardContent>
+    </Card>
+  );
+}
 
 export default function VideoConvert({ active }: Props) {
   const [files, setFiles] = useState<FileItem[]>([]);
@@ -52,292 +72,381 @@ export default function VideoConvert({ active }: Props) {
   const [quality, setQuality] = useState<Quality>("medium");
   const [converting, setConverting] = useState(false);
   const [currentIndex, setCurrentIndex] = useState(-1);
-  const [dragging, setDragging] = useState(false);
-
-  useEffect(() => {
-    const unlisten = listen<number>("convert-progress", (event) => {
-      if (currentIndex >= 0) {
-        setFiles(prev => prev.map((f, i) => 
-          i === currentIndex ? { ...f, progress: Math.round(event.payload) } : f
-        ));
-      }
-    });
-    return () => { unlisten.then(fn => fn()); };
-  }, [currentIndex]);
+  const cancelRequestedRef = useRef(false);
+  const toast = useToast();
+  const task = useTaskReporter("video-convert");
+  const fileActions = useFileActions();
 
   useEffect(() => {
     if (!active) return;
-    const unlistenEnter = listen("tauri://drag-enter", () => setDragging(true));
-    const unlistenLeave = listen("tauri://drag-leave", () => setDragging(false));
-    const unlistenDrop = listen<{ paths: string[] }>("tauri://drag-drop", (event) => {
-      setDragging(false);
-      if (event.payload.paths?.length > 0) {
-        addFiles(event.payload.paths);
+
+    return safeListen<number>("convert-progress", (event) => {
+      if (currentIndex >= 0) {
+        setFiles((prev) =>
+          prev.map((file, index) => (index === currentIndex ? { ...file, progress: Math.round(event.payload) } : file))
+        );
       }
     });
-    return () => {
-      unlistenEnter.then(fn => fn());
-      unlistenLeave.then(fn => fn());
-      unlistenDrop.then(fn => fn());
-    };
-  }, [active, files]);
+  }, [active, currentIndex]);
 
-  const addFiles = async (paths: string[]) => {
+  const { dragging } = useWindowDrop({
+    active,
+    onDrop: (paths) => {
+      void addFiles(paths);
+    },
+  });
+
+  async function addFiles(paths: string[]) {
     const videoExts = ["mov", "mp4", "avi", "mkv", "webm", "flv", "wmv"];
-    const newPaths = paths.filter(p => {
-      const ext = p.split(".").pop()?.toLowerCase() || "";
-      return videoExts.includes(ext) && !files.some(f => f.path === p);
+    const newPaths = paths.filter((path) => {
+      const ext = getExtension(path).toLowerCase();
+      return videoExts.includes(ext) && !files.some((file) => file.path === path);
     });
-    
-    // 获取文件大小
+
     const newFiles: FileItem[] = [];
-    for (const p of newPaths) {
+    for (const path of newPaths) {
       try {
-        const size = await invoke<number>("get_file_size", { path: p });
+        const size = await invoke<number>("get_file_size", { path });
         newFiles.push({
           id: Math.random().toString(36).slice(2),
-          path: p,
-          name: p.split("/").pop() || p.split("\\").pop() || "",
-          sourceFormat: p.split(".").pop()?.toLowerCase() || "",
+          path,
+          name: getBaseName(path),
+          sourceFormat: getExtension(path).toLowerCase(),
           size,
-          status: "pending" as FileStatus,
+          status: "pending",
           progress: 0,
         });
       } catch {
-        // 忽略无法读取的文件
+        // ignore unreadable files
       }
     }
-    
-    if (newFiles.length > 0) {
-      setFiles(prev => [...prev, ...newFiles]);
-    }
-  };
 
-  const handleSelectFiles = async () => {
+    if (newFiles.length > 0) {
+      setFiles((prev) => [...prev, ...newFiles]);
+    }
+  }
+
+  async function handleSelectFiles() {
     const selected = await open({
       title: "选择视频文件",
       multiple: true,
       filters: [{ name: "视频", extensions: ["mov", "mp4", "avi", "mkv", "webm"] }],
     });
     if (selected) {
-      addFiles(Array.isArray(selected) ? selected : [selected]);
+      await addFiles(Array.isArray(selected) ? selected : [selected]);
     }
-  };
+  }
 
-  const removeFile = (id: string) => {
-    setFiles(prev => prev.filter(f => f.id !== id));
-  };
+  function removeFile(id: string) {
+    setFiles((prev) => prev.filter((file) => file.id !== id));
+  }
 
-  const startConvert = async () => {
-    const pendingFiles = files.filter(f => f.status === "pending");
+  async function startConvert() {
+    const pendingFiles = files.filter((file) => file.status === "pending");
     if (pendingFiles.length === 0) return;
 
     setConverting(true);
+    cancelRequestedRef.current = false;
+    let successCount = 0;
+    let failedCount = 0;
+    let wasCancelled = false;
 
-    for (let i = 0; i < files.length; i++) {
-      if (files[i].status !== "pending") continue;
-      
-      setCurrentIndex(i);
-      setFiles(prev => prev.map((f, idx) => 
-        idx === i ? { ...f, status: "converting", progress: 0, startTime: Date.now() } : f
-      ));
+    for (let index = 0; index < files.length; index++) {
+      if (cancelRequestedRef.current) {
+        wasCancelled = true;
+        break;
+      }
+      if (files[index].status !== "pending") continue;
 
-      const file = files[i];
-      const baseName = file.name.replace(/\.[^.]+$/, "");
-      const dir = file.path.substring(0, file.path.lastIndexOf("/") + 1);
-      const outputPath = `${dir}${baseName}_converted.${targetFormat}`;
+      setCurrentIndex(index);
+      setFiles((prev) =>
+        prev.map((file, current) =>
+          current === index ? { ...file, status: "converting", progress: 0, startTime: Date.now() } : file
+        )
+      );
+
+      const file = files[index];
+      const outputPath = joinPath(
+        getDirName(file.path),
+        `${stripExtension(file.name)}_converted.${targetFormat}`,
+        getPathSeparator(file.path)
+      );
 
       try {
         await invoke("convert_video", {
           input: file.path,
           output: outputPath,
           format: targetFormat,
-          quality: quality,
+          quality,
         });
-        // 获取输出文件大小
+
         let outputSize = 0;
         try {
           outputSize = await invoke<number>("get_file_size", { path: outputPath });
-        } catch {}
-        setFiles(prev => prev.map((f, idx) => {
-          if (idx !== i) return f;
-          const duration = f.startTime ? Math.round((Date.now() - f.startTime) / 1000) : 0;
-          return { ...f, status: "done", progress: 100, outputPath, outputSize, duration };
-        }));
+        } catch {
+          // ignore
+        }
+
+        setFiles((prev) =>
+          prev.map((item, current) => {
+            if (current !== index) return item;
+            const duration = item.startTime ? Math.round((Date.now() - item.startTime) / 1000) : 0;
+            return { ...item, status: "done", progress: 100, outputPath, outputSize, duration };
+          })
+        );
+        successCount += 1;
       } catch (e) {
-        setFiles(prev => prev.map((f, idx) => {
-          if (idx !== i) return f;
-          const duration = f.startTime ? Math.round((Date.now() - f.startTime) / 1000) : 0;
-          return { ...f, status: "error", error: String(e), duration };
-        }));
+        const message = String(e);
+        setFiles((prev) =>
+          prev.map((item, current) => {
+            if (current !== index) return item;
+            const duration = item.startTime ? Math.round((Date.now() - item.startTime) / 1000) : 0;
+            return { ...item, status: "error", error: message, duration };
+          })
+        );
+        if (message.includes("取消")) {
+          wasCancelled = true;
+          break;
+        }
+        failedCount += 1;
       }
     }
 
     setConverting(false);
     setCurrentIndex(-1);
-  };
+    cancelRequestedRef.current = false;
 
-  const handleCancel = () => {
-    invoke("cancel_convert");
+    if (wasCancelled) {
+      toast.info("已取消转换");
+      return;
+    }
+
+    if (successCount > 0 && failedCount === 0) {
+      toast.success(`转换完成：${successCount} 个文件`);
+    } else if (successCount > 0 || failedCount > 0) {
+      toast.warning(`转换结束：${successCount} 个成功，${failedCount} 个失败`);
+    }
+  }
+
+  function handleCancel() {
+    cancelRequestedRef.current = true;
+    void invoke("cancel_convert");
     setConverting(false);
-  };
+  }
 
-  const doneCount = files.filter(f => f.status === "done").length;
-  const errorCount = files.filter(f => f.status === "error").length;
-  const pendingCount = files.filter(f => f.status === "pending").length;
+  const doneCount = files.filter((file) => file.status === "done").length;
+  const failedCount = files.filter((file) => file.status === "error").length;
+  const pendingCount = files.filter((file) => file.status === "pending").length;
+
+  useEffect(() => {
+    if (!converting) {
+      task.clearTask();
+      return;
+    }
+
+    const totalCount = files.length || 1;
+    const completedCount = files.filter((file) => file.status === "done" || file.status === "error").length;
+    const currentProgress = currentIndex >= 0 && files[currentIndex] ? files[currentIndex].progress : 0;
+
+    task.reportTask({
+      title: "格式转换",
+      stage: `已完成 ${completedCount} / ${totalCount}`,
+      detail: currentIndex >= 0 && files[currentIndex] ? files[currentIndex].name : "准备转换",
+      progress: ((completedCount + currentProgress / 100) / totalCount) * 100,
+      cancellable: true,
+      onCancel: handleCancel,
+    });
+  }, [converting, files, currentIndex]);
 
   return (
-    <div className="p-6 space-y-6">
-      {/* 拖拽选择区域 */}
-      <div className="card p-6">
-        <div
-          onClick={handleSelectFiles}
-          className={`drop-zone ${dragging && active ? "dragging" : ""}`}
-        >
-          <div className="text-5xl mb-4">
-            {converting ? "⏳" : dragging ? "📂" : "🎬"}
-          </div>
-          <div className="text-base text-gray-600 mb-2">
-            {converting ? "转换中，请稍候..." : dragging ? "松开以添加视频" : "拖入视频 或 点击选择"}
-          </div>
-          <div className="text-sm text-gray-400">
-            支持 MOV、MP4、AVI、MKV 等格式，可批量添加
-          </div>
-        </div>
-
-        {files.length > 0 && (
-          <div className="mt-4 px-3 py-2 bg-gray-50 rounded text-sm text-gray-500">
-            已选择 {files.length} 个视频
-            {doneCount > 0 && <span className="text-green-600 ml-2">✓ {doneCount} 完成</span>}
-            {errorCount > 0 && <span className="text-red-500 ml-2">✕ {errorCount} 失败</span>}
-          </div>
-        )}
-      </div>
-
-      {/* 设置和文件列表 */}
-      {files.length > 0 && (
-        <div className="grid grid-cols-3 gap-6">
-          {/* 左侧：文件列表 */}
-          <div className="col-span-2 card">
-            <div className="px-4 py-3 border-b border-gray-100 flex items-center justify-between">
-              <span className="font-medium">文件列表</span>
-              {!converting && (
-                <button onClick={handleSelectFiles} className="text-sm text-blue-500 hover:text-blue-600">
-                  + 添加更多
-                </button>
-              )}
+    <div className="space-y-6 p-6">
+      <Card className="overflow-hidden">
+        <CardContent className="px-5 py-5">
+          <div
+            onClick={handleSelectFiles}
+            className={cn("drop-zone flex flex-col items-center justify-center", dragging && active && "dragging")}
+          >
+            <div className="mb-4 flex h-16 w-16 items-center justify-center rounded-[22px] bg-white text-3xl shadow-[0_16px_34px_rgba(15,23,42,0.08)]">
+              {converting ? "⏳" : dragging ? "📂" : "🎬"}
             </div>
-            <div className="max-h-80 overflow-auto">
-              {files.map((file, index) => (
-                <div
-                  key={file.id}
-                  className={`flex items-center gap-3 px-4 py-3 border-b border-gray-50 last:border-0
-                    ${file.status === "converting" ? "bg-blue-50" : 
-                      file.status === "done" ? "bg-green-50" :
-                      file.status === "error" ? "bg-red-50" : ""}`}
-                >
-                  <div className="w-6 h-6 rounded bg-gray-100 flex items-center justify-center text-xs text-gray-500 flex-shrink-0">
-                    {index + 1}
-                  </div>
-                  <div className="flex-1 min-w-0">
-                    <div className="text-sm truncate">{file.name}</div>
-                    <div className="text-xs text-gray-400 mt-0.5">
-                      {formatSize(file.size)}
-                      {file.status === "done" && file.outputSize !== undefined && (
-                        <span className="ml-2">→ {formatSize(file.outputSize)}</span>
-                      )}
+            <div className="text-lg font-semibold text-slate-900">
+              {converting ? "转换任务进行中" : dragging ? "松开以添加视频文件" : "拖入视频，或点击选择"}
+            </div>
+            <div className="mt-5">
+              <Button variant="secondary" size="sm">
+                {converting ? "处理中…" : "添加视频"}
+              </Button>
+            </div>
+          </div>
+          {files.length > 0 && (
+            <div className="mt-4 flex flex-wrap items-center gap-3 rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3">
+              <Badge tone="info">任务队列</Badge>
+              <div className="text-sm text-slate-600">已选择 {files.length} 个文件</div>
+              {doneCount > 0 && <Badge tone="success">完成 {doneCount}</Badge>}
+              {failedCount > 0 && <Badge tone="danger">失败 {failedCount}</Badge>}
+            </div>
+          )}
+        </CardContent>
+      </Card>
+
+      {files.length === 0 ? null : (
+        <>
+          <div className="grid gap-4 lg:grid-cols-3">
+            <SummaryCard label="队列总数" value={files.length.toLocaleString()} />
+            <SummaryCard label="待转换" value={pendingCount.toLocaleString()} />
+            <SummaryCard label="已完成" value={doneCount.toLocaleString()} />
+          </div>
+
+          <div className="grid gap-6 xl:grid-cols-[minmax(0,1.5fr)_360px]">
+            <Card className="overflow-hidden">
+              <CardHeader>
+                <div>
+                  <CardTitle>转换队列</CardTitle>
+                </div>
+                {!converting && (
+                  <Button variant="secondary" size="sm" onClick={handleSelectFiles}>
+                    继续添加
+                  </Button>
+                )}
+              </CardHeader>
+              <CardContent className="space-y-3 px-3 py-3">
+                {files.map((file, index) => (
+                  <div
+                    key={file.id}
+                    className={cn(
+                      "rounded-2xl border px-4 py-4",
+                      file.status === "done" && "border-emerald-100 bg-emerald-50/70",
+                      file.status === "converting" && "border-blue-100 bg-blue-50/80",
+                      file.status === "error" && "border-rose-100 bg-rose-50/70",
+                      file.status === "pending" && "border-slate-200 bg-slate-50/80"
+                    )}
+                  >
+                    <div className="flex items-start gap-4">
+                      <div className="flex h-9 w-9 flex-shrink-0 items-center justify-center rounded-2xl bg-white text-sm font-medium shadow-[0_10px_20px_rgba(15,23,42,0.06)]">
+                        {index + 1}
+                      </div>
+                      <div className="min-w-0 flex-1">
+                        <div className="flex items-center gap-2">
+                          <div className="truncate text-sm font-medium text-slate-900">{file.name}</div>
+                          <Badge tone="default">{file.sourceFormat.toUpperCase()}</Badge>
+                        </div>
+                        <div className="mt-1 text-xs text-slate-500">
+                          {formatSize(file.size)}
+                          {file.outputSize !== undefined && <span className="ml-2">→ {formatSize(file.outputSize)}</span>}
+                        </div>
+                        {file.outputPath && <div className="mt-1 truncate text-xs text-slate-400">{file.outputPath}</div>}
+                        {file.error && <div className="mt-1 text-xs text-rose-600">{file.error}</div>}
+                        {file.status === "converting" && (
+                          <div className="mt-3">
+                            <Progress value={file.progress} />
+                          </div>
+                        )}
+                      </div>
+                      <div className="flex items-center gap-2">
+                        {file.status === "pending" && <Badge tone="default">等待中</Badge>}
+                        {file.status === "converting" && <Badge tone="info">{file.progress}%</Badge>}
+                        {file.status === "done" && <Badge tone="success">完成</Badge>}
+                        {file.status === "error" && <Badge tone="danger">失败</Badge>}
+                        {!converting && file.status !== "converting" && (
+                          <Button variant="ghost" size="sm" onClick={() => removeFile(file.id)}>
+                            移除
+                          </Button>
+                        )}
+                      </div>
                     </div>
-                    {file.status === "converting" && (
-                      <div className="mt-1.5 h-1.5 bg-blue-100 rounded-full overflow-hidden">
-                        <div className="h-full bg-blue-500 rounded-full transition-all" style={{ width: `${file.progress}%` }} />
-                      </div>
-                    )}
                     {file.status === "done" && file.outputPath && (
-                      <div className="text-xs text-gray-400 mt-0.5 truncate" title={file.outputPath}>
-                        {file.outputPath.split("/").pop()}
+                      <div className="mt-3 flex items-center gap-2 border-t border-emerald-100 pt-3">
+                        <Button variant="secondary" size="sm" onClick={() => void fileActions.openFile(file.outputPath!)}>
+                          打开文件
+                        </Button>
+                        <Button variant="secondary" size="sm" onClick={() => void fileActions.revealInDir(file.outputPath!)}>
+                          打开位置
+                        </Button>
+                        {typeof file.duration === "number" && <span className="text-xs text-slate-500">耗时 {file.duration}s</span>}
                       </div>
-                    )}
-                    {file.status === "error" && (
-                      <div className="text-xs text-red-500 mt-0.5 truncate">{file.error}</div>
                     )}
                   </div>
-                  <div className="flex items-center gap-2 flex-shrink-0">
-                    {file.status === "pending" && <span className="text-xs text-gray-400">等待中</span>}
-                    {file.status === "converting" && <span className="text-xs text-blue-500 font-medium">{file.progress}%</span>}
-                    {file.status === "done" && (
-                      <span className="text-xs text-green-600">
-                        ✓ {file.duration}s
-                      </span>
-                    )}
-                    {file.status === "error" && <span className="text-xs text-red-500">失败</span>}
-                    {!converting && file.status !== "converting" && (
-                      <button onClick={() => removeFile(file.id)} className="w-6 h-6 rounded hover:bg-gray-200 flex items-center justify-center text-gray-400 hover:text-gray-600">×</button>
-                    )}
+                ))}
+              </CardContent>
+            </Card>
+
+            <Card>
+              <CardHeader>
+                <div>
+                  <CardTitle>输出设置</CardTitle>
+                </div>
+              </CardHeader>
+              <CardContent className="space-y-6">
+                <div>
+                  <div className="mb-3 text-sm font-medium text-slate-800">输出格式</div>
+                  <div className="space-y-2">
+                    {FORMATS.map((item) => (
+                      <button
+                        key={item.value}
+                        onClick={() => !converting && setTargetFormat(item.value)}
+                        disabled={converting}
+                        className={cn(
+                          "flex w-full items-center justify-between rounded-2xl border px-4 py-3 text-left transition",
+                          targetFormat === item.value
+                            ? "border-[var(--brand-300)] bg-[var(--brand-50)]"
+                            : "border-slate-200 bg-white hover:border-slate-300"
+                        )}
+                      >
+                        <div>
+                          <div className="text-sm font-medium text-slate-900">{item.label}</div>
+                          <div className="text-xs text-slate-500">{item.hint}</div>
+                        </div>
+                        {targetFormat === item.value && <Badge tone="info">当前</Badge>}
+                      </button>
+                    ))}
                   </div>
                 </div>
-              ))}
-            </div>
+
+                <div>
+                  <div className="mb-3 text-sm font-medium text-slate-800">画质策略</div>
+                  <div className="space-y-2">
+                    {QUALITIES.map((item) => (
+                      <button
+                        key={item.value}
+                        onClick={() => !converting && setQuality(item.value)}
+                        disabled={converting}
+                        className={cn(
+                          "flex w-full items-center justify-between rounded-2xl border px-4 py-3 text-left transition",
+                          quality === item.value
+                            ? "border-[var(--brand-300)] bg-[var(--brand-50)]"
+                            : "border-slate-200 bg-white hover:border-slate-300"
+                        )}
+                      >
+                        <div>
+                          <div className="text-sm font-medium text-slate-900">{item.label}</div>
+                          <div className="text-xs text-slate-500">{item.hint}</div>
+                        </div>
+                        {quality === item.value && <Badge tone="info">当前</Badge>}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+
+                <div className="space-y-3 border-t border-slate-100 pt-4">
+                  {!converting ? (
+                    <>
+                      <Button variant="primary" className="w-full" onClick={startConvert} disabled={pendingCount === 0}>
+                        开始转换{pendingCount > 0 ? ` (${pendingCount})` : ""}
+                      </Button>
+                      <Button variant="secondary" className="w-full" onClick={() => setFiles([])}>
+                        清空队列
+                      </Button>
+                    </>
+                  ) : (
+                    <Button variant="danger" className="w-full" onClick={handleCancel}>
+                      取消当前批次
+                    </Button>
+                  )}
+                </div>
+              </CardContent>
+            </Card>
           </div>
-
-          {/* 右侧：设置面板 */}
-          <div className="card p-4 space-y-4">
-            <div>
-              <div className="text-sm font-medium mb-3">输出格式</div>
-              <div className="grid grid-cols-3 gap-2">
-                {FORMATS.map(f => (
-                  <button
-                    key={f.value}
-                    onClick={() => !converting && setTargetFormat(f.value)}
-                    disabled={converting}
-                    className={`btn text-sm py-1.5 ${targetFormat === f.value ? "btn-primary" : "btn-default"}`}
-                  >
-                    {f.label}
-                  </button>
-                ))}
-              </div>
-            </div>
-
-            <div>
-              <div className="text-sm font-medium mb-3">画质</div>
-              <div className="grid grid-cols-3 gap-2">
-                {QUALITIES.map(q => (
-                  <button
-                    key={q.value}
-                    onClick={() => !converting && setQuality(q.value)}
-                    disabled={converting}
-                    className={`btn text-sm py-1.5 ${quality === q.value ? "btn-primary" : "btn-default"}`}
-                  >
-                    {q.label}
-                  </button>
-                ))}
-              </div>
-            </div>
-
-            <div className="pt-4 space-y-2">
-              {!converting ? (
-                <>
-                  <button
-                    onClick={startConvert}
-                    disabled={pendingCount === 0}
-                    className="btn btn-primary w-full"
-                  >
-                    开始转换 {pendingCount > 0 && `(${pendingCount})`}
-                  </button>
-                  <button
-                    onClick={() => setFiles([])}
-                    className="btn btn-default w-full"
-                  >
-                    清空
-                  </button>
-                </>
-              ) : (
-                <button onClick={handleCancel} className="btn btn-danger w-full">
-                  取消转换
-                </button>
-              )}
-            </div>
-          </div>
-        </div>
+        </>
       )}
     </div>
   );

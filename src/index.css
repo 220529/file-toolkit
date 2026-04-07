@@ -1,19 +1,67 @@
 @import "tailwindcss";
 
 :root {
-  --primary-color: #1677ff;
-  --success-color: #52c41a;
-  --warning-color: #faad14;
-  --error-color: #ff4d4f;
-  --border-radius: 8px;
+  --brand-50: #eef4ff;
+  --brand-100: #dce8ff;
+  --brand-300: #95b8ff;
+  --brand-400: #5d92ff;
+  --brand-500: #336dff;
+  --brand-600: #2b68f1;
+  --brand-700: #2554c2;
+  --success-600: #0f9f6e;
+  --warning-600: #d07b19;
+  --danger-500: #ef4444;
+  --danger-600: #dc2626;
+  --radius-sm: 12px;
+  --radius-md: 18px;
+  --radius-lg: 24px;
+  --surface: rgba(255, 255, 255, 0.82);
+  --surface-strong: rgba(255, 255, 255, 0.92);
+  --stroke: rgba(148, 163, 184, 0.18);
+  --text-strong: #0f172a;
+  --text-muted: #64748b;
+}
+
+html,
+body,
+#root {
+  height: 100%;
+  overflow: hidden;
 }
 
 body {
   margin: 0;
-  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", sans-serif;
+  font-family: "SF Pro Text", "Segoe UI", "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", sans-serif;
   font-size: 14px;
-  color: #333;
-  background: #f5f5f5;
+  color: var(--text-strong);
+  background:
+    radial-gradient(circle at top left, rgba(125, 164, 255, 0.32), transparent 28%),
+    radial-gradient(circle at top right, rgba(180, 214, 255, 0.44), transparent 30%),
+    linear-gradient(180deg, #f8fbff 0%, #eef3f9 38%, #edf1f6 100%);
+}
+
+* {
+  box-sizing: border-box;
+}
+
+::selection {
+  background: rgba(51, 109, 255, 0.16);
+}
+
+::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+
+::-webkit-scrollbar-thumb {
+  border: 2px solid transparent;
+  border-radius: 999px;
+  background: rgba(148, 163, 184, 0.5);
+  background-clip: padding-box;
+}
+
+::-webkit-scrollbar-track {
+  background: transparent;
 }
 
 /* 按钮样式 */
@@ -22,40 +70,47 @@ body {
   align-items: center;
   justify-content: center;
   gap: 6px;
-  padding: 8px 16px;
-  border-radius: var(--border-radius);
-  font-size: 14px;
+  padding: 9px 16px;
+  border-radius: var(--radius-sm);
+  font-size: 13px;
   font-weight: 500;
   cursor: pointer;
-  transition: all 0.2s;
+  transition: all 0.2s ease;
   border: none;
   outline: none;
+  white-space: nowrap;
 }
 
 .btn-primary {
-  background: var(--primary-color);
+  background: var(--brand-600);
   color: white;
+  box-shadow: 0 16px 32px rgba(43, 104, 241, 0.22);
 }
 .btn-primary:hover:not(:disabled) {
-  background: #4096ff;
+  background: var(--brand-500);
+  transform: translateY(-1px);
 }
 
 .btn-default {
-  background: white;
-  border: 1px solid #d9d9d9;
-  color: #333;
+  background: rgba(255, 255, 255, 0.95);
+  border: 1px solid rgba(148, 163, 184, 0.22);
+  color: var(--text-strong);
+  box-shadow: 0 8px 24px rgba(15, 23, 42, 0.04);
 }
 .btn-default:hover:not(:disabled) {
-  border-color: var(--primary-color);
-  color: var(--primary-color);
+  border-color: var(--brand-300);
+  color: var(--brand-700);
+  background: white;
 }
 
 .btn-danger {
-  background: var(--error-color);
+  background: var(--danger-600);
   color: white;
+  box-shadow: 0 16px 28px rgba(220, 38, 38, 0.18);
 }
 .btn-danger:hover:not(:disabled) {
-  background: #ff7875;
+  background: var(--danger-500);
+  transform: translateY(-1px);
 }
 
 .btn:disabled {
@@ -65,31 +120,42 @@ body {
 
 /* 卡片样式 */
 .card {
-  background: white;
-  border-radius: var(--border-radius);
-  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.03), 0 1px 6px -1px rgba(0, 0, 0, 0.02), 0 2px 4px rgba(0, 0, 0, 0.02);
+  background: var(--surface);
+  border-radius: var(--radius-lg);
+  border: 1px solid var(--stroke);
+  box-shadow:
+    0 18px 54px rgba(15, 23, 42, 0.08),
+    inset 0 1px 0 rgba(255, 255, 255, 0.7);
+  backdrop-filter: blur(14px);
 }
 
 /* 拖拽区域 */
 .drop-zone {
-  border: 2px dashed #d9d9d9;
-  border-radius: var(--border-radius);
-  padding: 48px 24px;
+  border: 1.5px dashed rgba(148, 163, 184, 0.45);
+  border-radius: calc(var(--radius-lg) - 6px);
+  min-height: 188px;
+  padding: 34px 20px;
   text-align: center;
   cursor: pointer;
   transition: all 0.3s;
-  background: #fafafa;
+  background:
+    linear-gradient(180deg, rgba(255, 255, 255, 0.94), rgba(246, 249, 255, 0.86)),
+    radial-gradient(circle at top, rgba(185, 208, 255, 0.2), transparent 42%);
 }
 
 .drop-zone:hover {
-  border-color: var(--primary-color);
-  background: #e6f4ff;
+  border-color: rgba(51, 109, 255, 0.42);
+  background:
+    linear-gradient(180deg, rgba(255, 255, 255, 1), rgba(239, 246, 255, 0.92)),
+    radial-gradient(circle at top, rgba(125, 164, 255, 0.22), transparent 42%);
 }
 
 .drop-zone.dragging {
-  border-color: var(--primary-color);
-  background: #e6f4ff;
-  border-style: solid;
+  border-color: rgba(51, 109, 255, 0.62);
+  background:
+    linear-gradient(180deg, rgba(255, 255, 255, 1), rgba(232, 242, 255, 0.98)),
+    radial-gradient(circle at top, rgba(125, 164, 255, 0.28), transparent 42%);
+  box-shadow: inset 0 0 0 1px rgba(51, 109, 255, 0.14);
 }
 
 /* 表格样式 */
@@ -99,51 +165,59 @@ body {
 }
 
 .table th {
-  background: #fafafa;
+  background: rgba(248, 250, 252, 0.9);
   padding: 12px 16px;
   text-align: left;
   font-weight: 500;
-  color: #666;
-  border-bottom: 1px solid #f0f0f0;
+  color: var(--text-muted);
+  border-bottom: 1px solid rgba(226, 232, 240, 0.82);
 }
 
 .table td {
   padding: 12px 16px;
-  border-bottom: 1px solid #f0f0f0;
+  border-bottom: 1px solid rgba(226, 232, 240, 0.74);
 }
 
 .table tr:hover td {
-  background: #fafafa;
+  background: rgba(248, 250, 252, 0.72);
 }
 
 /* 标签样式 */
 .tag {
   display: inline-block;
-  padding: 2px 8px;
-  border-radius: 4px;
+  padding: 3px 8px;
+  border-radius: 999px;
   font-size: 12px;
   font-family: "SF Mono", Monaco, Consolas, monospace;
 }
 
 .tag-default {
-  background: #f5f5f5;
-  border: 1px solid #d9d9d9;
+  background: rgba(241, 245, 249, 0.95);
+  border: 1px solid rgba(148, 163, 184, 0.16);
+  color: #475569;
 }
 
 /* 统计卡片 */
 .stat-card {
-  background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+  background:
+    radial-gradient(circle at top right, rgba(255, 255, 255, 0.34), transparent 38%),
+    linear-gradient(135deg, #316cf5 0%, #1846b8 100%);
   color: white;
-  border-radius: var(--border-radius);
+  border-radius: var(--radius-lg);
   padding: 20px 24px;
+  box-shadow: 0 18px 42px rgba(49, 108, 245, 0.22);
 }
 
 .stat-card.green {
-  background: linear-gradient(135deg, #11998e 0%, #38ef7d 100%);
+  background:
+    radial-gradient(circle at top right, rgba(255, 255, 255, 0.26), transparent 38%),
+    linear-gradient(135deg, #0f9f6e 0%, #26b685 100%);
 }
 
 .stat-card.orange {
-  background: linear-gradient(135deg, #f093fb 0%, #f5576c 100%);
+  background:
+    radial-gradient(circle at top right, rgba(255, 255, 255, 0.28), transparent 38%),
+    linear-gradient(135deg, #ff934f 0%, #ef5b48 100%);
 }
 
 

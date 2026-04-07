@@ -36,6 +36,16 @@
 | Linux | `小文喵_x.x.x_amd64.deb` |
 
 > 安装包已内嵌 FFmpeg，下载即用。
+>
+> macOS 提示：
+> - Apple Silicon 机型请下载 `aarch64` 版本，Intel 机型请下载 `x64` 版本。
+> - macOS 版本未签名，首次打开如果提示“已损坏”或“无法验证开发者”，请先将 App 拖到“应用程序”，再执行：
+>
+> ```bash
+> xattr -dr com.apple.quarantine /Applications/小文喵.app
+> ```
+>
+> - 如果仍被拦截，也可以在 Finder 中右键应用，选择“打开”。
 
 ## 本地开发
 
