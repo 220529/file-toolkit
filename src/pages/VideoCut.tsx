@@ -739,6 +739,7 @@ export default function VideoCut({ active = true }: { active?: boolean }) {
                   {videoInfo && (
                     <div className="text-xs text-slate-400">
                       拖动时间轴左手柄调整开始，右手柄调整结束。主预览会按帧吸附到当前位置。
+                      {preciseMode ? " 导出结果会更接近当前预览帧。" : " 快速模式导出可能受关键帧影响，与预览存在轻微偏差。"}
                     </div>
                   )}
                 </div>
@@ -753,9 +754,14 @@ export default function VideoCut({ active = true }: { active?: boolean }) {
                     />
                     <span>
                       <span className="font-medium text-slate-800">精确模式</span>
-                      <span className="ml-2 text-slate-500">更慢，但起止点更准。</span>
+                      <span className="ml-2 text-slate-500">重新编码，导出更接近当前预览的起止点。</span>
                     </span>
                   </label>
+                  <div className="mt-3 rounded-xl border border-slate-200 bg-white/80 px-3 py-3 text-xs leading-5 text-slate-500">
+                    {preciseMode
+                      ? "当前为精确模式：会重新编码，速度更慢，但起止点通常会更贴近你在预览里看到的位置。"
+                      : "当前为快速模式：无损、速度快，但 FFmpeg 会受关键帧限制，导出首尾可能和预览有轻微偏差。"}
+                  </div>
                 </div>
 
                 {processing && preciseMode && (
