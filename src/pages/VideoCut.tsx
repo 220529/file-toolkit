@@ -1,5 +1,5 @@
-import { useEffect, useRef, useState, type PointerEvent as ReactPointerEvent } from "react";
-import { invoke } from "@tauri-apps/api/core";
+import { useEffect, useRef, useState, type PointerEvent as ReactPointerEvent, type SyntheticEvent } from "react";
+import { convertFileSrc, invoke } from "@tauri-apps/api/core";
 import { open, save } from "@tauri-apps/plugin-dialog";
 import { useTaskReporter } from "../components/TaskCenter";
 import { useToast } from "../components/Toast";
@@ -23,14 +23,15 @@ interface VideoInfo {
 type TimelineDragMode = "playhead" | "start" | "end";
 
 function formatTime(seconds: number) {
-  const h = Math.floor(seconds / 3600);
-  const m = Math.floor((seconds % 3600) / 60);
-  const s = Math.floor(seconds % 60);
-  const ms = Math.floor((seconds % 1) * 10);
+  const totalMs = Math.max(0, Math.round(seconds * 1000));
+  const h = Math.floor(totalMs / 3_600_000);
+  const m = Math.floor((totalMs % 3_600_000) / 60_000);
+  const s = Math.floor((totalMs % 60_000) / 1000);
+  const ms = totalMs % 1000;
   if (h > 0) {
-    return `${h}:${m.toString().padStart(2, "0")}:${s.toString().padStart(2, "0")}.${ms}`;
+    return `${h}:${m.toString().padStart(2, "0")}:${s.toString().padStart(2, "0")}.${ms.toString().padStart(3, "0")}`;
   }
-  return `${m}:${s.toString().padStart(2, "0")}.${ms}`;
+  return `${m}:${s.toString().padStart(2, "0")}.${ms.toString().padStart(3, "0")}`;
 }
 
 function parseTimeInput(value: string) {
@@ -44,9 +45,39 @@ function clamp(value: number, min: number, max: number) {
   return Math.min(max, Math.max(min, value));
 }
 
-function getMinClipDuration(duration: number) {
-  if (duration <= 0) return 0.1;
-  return Math.min(0.1, duration);
+function getMinClipDuration(duration: number, fps: number) {
+  if (duration <= 0) return 0;
+  return Math.min(getFrameDuration(fps), duration);
+}
+
+function getFrameDuration(fps: number) {
+  if (!Number.isFinite(fps) || fps <= 0) return 1 / 30;
+  const normalizedFps = clamp(fps, 1, 120);
+  return 1 / normalizedFps;
+}
+
+function snapTimeToFrame(time: number, info: VideoInfo | null, strategy: "nearest" | "floor" | "ceil" = "nearest") {
+  if (!info) return Math.max(0, time);
+  const duration = Math.max(0, info.duration);
+  if (duration <= 0) return 0;
+  if (time <= 0) return 0;
+  if (time >= duration) return duration;
+
+  const frameDuration = getFrameDuration(info.fps);
+  const frameIndex = time / frameDuration;
+  const snappedIndex =
+    strategy === "floor" ? Math.floor(frameIndex) : strategy === "ceil" ? Math.ceil(frameIndex) : Math.round(frameIndex);
+  return clamp(snappedIndex * frameDuration, 0, duration);
+}
+
+function formatFps(fps: number) {
+  if (!Number.isFinite(fps) || fps <= 0) return "30";
+  return fps.toFixed(2).replace(/\.?0+$/, "");
+}
+
+function getPreferredPreviewStrategy(path: string): "video" | "image" {
+  const ext = getExtension(path).toLowerCase();
+  return ["mp4", "mov", "webm"].includes(ext) ? "video" : "image";
 }
 
 export default function VideoCut({ active = true }: { active?: boolean }) {
@@ -56,15 +87,18 @@ export default function VideoCut({ active = true }: { active?: boolean }) {
   const [endTime, setEndTime] = useState(0);
   const [processing, setProcessing] = useState(false);
   const [preciseMode, setPreciseMode] = useState(false);
+  const [previewStrategy, setPreviewStrategy] = useState<"video" | "image">("video");
   const [previewFrame, setPreviewFrame] = useState("");
   const [timelineFrames, setTimelineFrames] = useState<string[]>([]);
-  const [loadingPreview, setLoadingPreview] = useState(false);
   const [currentPreviewTime, setCurrentPreviewTime] = useState(0);
-  const previewTimeoutRef = useRef<number | null>(null);
   const loadRequestIdRef = useRef(0);
   const previewRequestIdRef = useRef(0);
   const timelineRequestIdRef = useRef(0);
   const timelineRef = useRef<HTMLDivElement | null>(null);
+  const previewVideoRef = useRef<HTMLVideoElement | null>(null);
+  const previewSeekRafRef = useRef<number | null>(null);
+  const pendingPreviewSeekRef = useRef<number | null>(null);
+  const previewTimeoutRef = useRef<number | null>(null);
   const [timelineDragMode, setTimelineDragMode] = useState<TimelineDragMode | null>(null);
   const videoInfoRef = useRef<VideoInfo | null>(null);
   const videoPathRef = useRef("");
@@ -75,8 +109,11 @@ export default function VideoCut({ active = true }: { active?: boolean }) {
   const [editingStart, setEditingStart] = useState(false);
   const [editingEnd, setEditingEnd] = useState(false);
   const [progress, setProgress] = useState(0);
+  const [loadingPreview, setLoadingPreview] = useState(false);
+  const [previewReady, setPreviewReady] = useState(false);
   const toast = useToast();
   const task = useTaskReporter("video-cut");
+  const previewVideoSrc = videoPath ? convertFileSrc(videoPath) : "";
   videoInfoRef.current = videoInfo;
   videoPathRef.current = videoPath;
   startTimeRef.current = startTime;
@@ -118,10 +155,14 @@ export default function VideoCut({ active = true }: { active?: boolean }) {
 
   useEffect(() => {
     return () => {
-      clearPendingPreviewTimeout();
       loadRequestIdRef.current += 1;
       previewRequestIdRef.current += 1;
       timelineRequestIdRef.current += 1;
+      if (previewSeekRafRef.current !== null) {
+        window.cancelAnimationFrame(previewSeekRafRef.current);
+        previewSeekRafRef.current = null;
+      }
+      clearPendingPreviewTimeout();
     };
   }, []);
 
@@ -131,11 +172,11 @@ export default function VideoCut({ active = true }: { active?: boolean }) {
     const activeDragMode = timelineDragMode;
 
     function handlePointerMove(event: PointerEvent) {
-      updateTimelineDrag(activeDragMode, event.clientX, false);
+      updateTimelineDrag(activeDragMode, event.clientX);
     }
 
     function handlePointerUp(event: PointerEvent) {
-      updateTimelineDrag(activeDragMode, event.clientX, true);
+      updateTimelineDrag(activeDragMode, event.clientX);
       setTimelineDragMode(null);
     }
 
@@ -149,10 +190,64 @@ export default function VideoCut({ active = true }: { active?: boolean }) {
   }, [timelineDragMode]);
 
   function clearPendingPreviewTimeout() {
-    if (previewTimeoutRef.current) {
+    if (previewTimeoutRef.current !== null) {
       window.clearTimeout(previewTimeoutRef.current);
       previewTimeoutRef.current = null;
     }
+  }
+
+  function schedulePreviewSeek(time: number) {
+    pendingPreviewSeekRef.current = time;
+    if (previewSeekRafRef.current !== null) return;
+
+    previewSeekRafRef.current = window.requestAnimationFrame(() => {
+      previewSeekRafRef.current = null;
+      const nextTime = pendingPreviewSeekRef.current;
+      const video = previewVideoRef.current;
+      if (nextTime === null || !video || video.readyState < 1) return;
+      if (!video.paused) {
+        video.pause();
+      }
+      if (Math.abs(video.currentTime - nextTime) > 0.001) {
+        video.currentTime = nextTime;
+      }
+    });
+  }
+
+  function syncPreviewTime(time: number) {
+    const info = videoInfoRef.current;
+    const next = info ? clamp(time, 0, info.duration) : Math.max(0, time);
+    setCurrentPreviewTime(next);
+    if (previewStrategy === "video") {
+      schedulePreviewSeek(next);
+    } else {
+      updatePreviewDebounced(next);
+    }
+  }
+
+  function handlePreviewLoadedMetadata(event: SyntheticEvent<HTMLVideoElement>) {
+    setPreviewReady(true);
+    const next = pendingPreviewSeekRef.current ?? currentPreviewTime;
+    if (next > 0) {
+      event.currentTarget.currentTime = next;
+    }
+  }
+
+  function handlePreviewTimeUpdate(event: SyntheticEvent<HTMLVideoElement>) {
+    const next = snapTimeToFrame(event.currentTarget.currentTime, videoInfoRef.current);
+    setCurrentPreviewTime(next);
+  }
+
+  function handlePreviewError() {
+    const path = videoPathRef.current;
+    if (!path) return;
+    setPreviewReady(false);
+    setPreviewStrategy("image");
+    if (previewSeekRafRef.current !== null) {
+      window.cancelAnimationFrame(previewSeekRafRef.current);
+      previewSeekRafRef.current = null;
+    }
+    void loadPreviewFrame(path, currentPreviewTime);
   }
 
   function getTimelineTimeFromClientX(clientX: number) {
@@ -167,75 +262,67 @@ export default function VideoCut({ active = true }: { active?: boolean }) {
     return ratio * info.duration;
   }
 
-  function updateTimelineDrag(mode: TimelineDragMode, clientX: number, finalize: boolean) {
+  function updateTimelineDrag(mode: TimelineDragMode, clientX: number) {
     const info = videoInfoRef.current;
-    const path = videoPathRef.current;
-    if (!info || !path) return;
+    if (!info) return;
 
     const rawTime = getTimelineTimeFromClientX(clientX);
-    const minDuration = getMinClipDuration(info.duration);
+    const minDuration = getMinClipDuration(info.duration, info.fps);
 
     if (mode === "start") {
-      const next = clamp(rawTime, 0, Math.max(0, endTimeRef.current - minDuration));
+      const snappedTime = snapTimeToFrame(rawTime, info, "floor");
+      const next = clamp(snappedTime, 0, Math.max(0, endTimeRef.current - minDuration));
       startTimeRef.current = next;
       setStartTime(next);
-      endTimeRef.current = Math.max(endTimeRef.current, next);
-      setCurrentPreviewTime(next);
-      if (finalize) {
-        clearPendingPreviewTimeout();
-        void loadPreviewFrame(path, next);
-      } else {
-        updatePreviewDebounced(next);
-      }
+      syncPreviewTime(next);
       return;
     }
 
     if (mode === "end") {
-      const next = clamp(rawTime, Math.min(info.duration, startTimeRef.current + minDuration), info.duration);
+      const snappedTime = snapTimeToFrame(rawTime, info, "ceil");
+      const next = clamp(snappedTime, Math.min(info.duration, startTimeRef.current + minDuration), info.duration);
       endTimeRef.current = next;
       setEndTime(next);
-      setCurrentPreviewTime(next);
-      if (finalize) {
-        clearPendingPreviewTimeout();
-        void loadPreviewFrame(path, next);
-      } else {
-        updatePreviewDebounced(next);
-      }
+      syncPreviewTime(next);
       return;
     }
 
-    const next = clamp(rawTime, 0, info.duration);
-    setCurrentPreviewTime(next);
-    if (finalize) {
-      clearPendingPreviewTimeout();
-      void loadPreviewFrame(path, next);
-    } else {
-      updatePreviewDebounced(next);
-    }
+    const next = clamp(snapTimeToFrame(rawTime, info), 0, info.duration);
+    syncPreviewTime(next);
   }
 
   function beginTimelineDrag(mode: TimelineDragMode, clientX: number) {
-    clearPendingPreviewTimeout();
     setTimelineDragMode(mode);
-    updateTimelineDrag(mode, clientX, false);
+    updateTimelineDrag(mode, clientX);
   }
 
   function applyCurrentFrameToStart() {
-    startTimeRef.current = currentPreviewTime;
-    setStartTime(currentPreviewTime);
-    if (currentPreviewTime > endTime) {
-      endTimeRef.current = currentPreviewTime;
-      setEndTime(currentPreviewTime);
+    const next = snapTimeToFrame(currentPreviewTime, videoInfoRef.current, "floor");
+    startTimeRef.current = next;
+    setStartTime(next);
+    if (next > endTime) {
+      endTimeRef.current = next;
+      setEndTime(next);
     }
   }
 
   function applyCurrentFrameToEnd() {
-    endTimeRef.current = currentPreviewTime;
-    setEndTime(currentPreviewTime);
-    if (currentPreviewTime < startTime) {
-      startTimeRef.current = currentPreviewTime;
-      setStartTime(currentPreviewTime);
+    const next = snapTimeToFrame(currentPreviewTime, videoInfoRef.current, "ceil");
+    endTimeRef.current = next;
+    setEndTime(next);
+    if (next < startTime) {
+      startTimeRef.current = next;
+      setStartTime(next);
     }
+  }
+
+  function stepPreviewFrame(direction: -1 | 1) {
+    const info = videoInfoRef.current;
+    if (!info) return;
+    const frameDuration = getFrameDuration(info.fps);
+    const strategy = direction < 0 ? "floor" : "ceil";
+    const next = snapTimeToFrame(currentPreviewTime + direction * frameDuration, info, strategy);
+    syncPreviewTime(next);
   }
 
   function handleTimelinePointerDown(event: ReactPointerEvent<HTMLDivElement>) {
@@ -252,11 +339,16 @@ export default function VideoCut({ active = true }: { active?: boolean }) {
     const loadRequestId = ++loadRequestIdRef.current;
     previewRequestIdRef.current += 1;
     timelineRequestIdRef.current += 1;
+    pendingPreviewSeekRef.current = 0;
     clearPendingPreviewTimeout();
+    const preferredStrategy = getPreferredPreviewStrategy(path);
+    setPreviewStrategy(preferredStrategy);
+    setPreviewFrame("");
+    setLoadingPreview(preferredStrategy === "image");
+    setPreviewReady(false);
 
     setVideoPath(path);
     setVideoInfo(null);
-    setPreviewFrame("");
     setTimelineFrames([]);
     setCurrentPreviewTime(0);
     setProgress(0);
@@ -269,14 +361,16 @@ export default function VideoCut({ active = true }: { active?: boolean }) {
       setStartTime(0);
       setEndTime(info.duration);
       setCurrentPreviewTime(0);
-      await loadPreviewFrame(path, 0);
-      if (loadRequestIdRef.current !== loadRequestId) return;
+      pendingPreviewSeekRef.current = 0;
+      if (preferredStrategy === "image") {
+        await loadPreviewFrame(path, 0);
+        if (loadRequestIdRef.current !== loadRequestId) return;
+      }
       void loadTimelineFrames(path);
     } catch (e) {
       if (loadRequestIdRef.current !== loadRequestId) return;
       setVideoPath("");
       setVideoInfo(null);
-      setPreviewFrame("");
       setTimelineFrames([]);
       setCurrentPreviewTime(0);
       toast.error("获取视频信息失败: " + e);
@@ -317,10 +411,11 @@ export default function VideoCut({ active = true }: { active?: boolean }) {
     clearPendingPreviewTimeout();
     previewTimeoutRef.current = window.setTimeout(() => {
       previewTimeoutRef.current = null;
-      if (videoPath) {
-        void loadPreviewFrame(videoPath, time);
+      const path = videoPathRef.current;
+      if (path) {
+        void loadPreviewFrame(path, time);
       }
-    }, 240);
+    }, 120);
   }
 
   async function selectVideo() {
@@ -381,8 +476,8 @@ export default function VideoCut({ active = true }: { active?: boolean }) {
   }
 
   const clipDuration = Math.max(0, endTime - startTime);
-  const timelineStartPercent = videoInfo ? (startTime / videoInfo.duration) * 100 : 0;
-  const timelineEndPercent = videoInfo ? (endTime / videoInfo.duration) * 100 : 0;
+  const timelineStartPercent = videoInfo && videoInfo.duration > 0 ? (startTime / videoInfo.duration) * 100 : 0;
+  const timelineEndPercent = videoInfo && videoInfo.duration > 0 ? (endTime / videoInfo.duration) * 100 : 0;
 
   return (
     <div className="space-y-6 p-6">
@@ -419,6 +514,10 @@ export default function VideoCut({ active = true }: { active?: boolean }) {
                   <span className="text-slate-400">画面规格</span>
                   <span className="font-medium text-slate-900">{videoInfo.width}×{videoInfo.height}</span>
                 </div>
+                <div className="flex items-center gap-2">
+                  <span className="text-slate-400">帧率</span>
+                  <span className="font-medium text-slate-900">{formatFps(videoInfo.fps)} fps</span>
+                </div>
               </CardContent>
             </Card>
           )}
@@ -440,17 +539,36 @@ export default function VideoCut({ active = true }: { active?: boolean }) {
               <CardContent className="space-y-4">
                 <div className="overflow-hidden rounded-[24px] bg-slate-950">
                   <div className="relative flex min-h-[360px] items-center justify-center px-4 py-4">
-                    {previewFrame ? (
+                    {previewStrategy === "video" && previewVideoSrc ? (
+                      <video
+                        key={previewVideoSrc}
+                        ref={previewVideoRef}
+                        src={previewVideoSrc}
+                        controls
+                        playsInline
+                        preload="metadata"
+                        className="max-h-[420px] w-full object-contain"
+                        onLoadedMetadata={handlePreviewLoadedMetadata}
+                        onTimeUpdate={handlePreviewTimeUpdate}
+                        onSeeked={handlePreviewTimeUpdate}
+                        onError={handlePreviewError}
+                      />
+                    ) : previewFrame ? (
                       <img src={previewFrame} alt="视频预览" className="max-h-[420px] w-full object-contain" />
                     ) : (
-                      <div className="text-sm text-slate-400">{loadingPreview ? "加载预览中…" : "等待生成预览"}</div>
+                      <div className="text-sm text-slate-400">{loadingPreview ? "加载预览中…" : "等待载入视频"}</div>
                     )}
                     <div className="absolute bottom-4 left-4 rounded-full bg-slate-950/80 px-3 py-1 text-xs font-medium text-white">
                       {formatTime(currentPreviewTime)}
                     </div>
-                    {loadingPreview && previewFrame && (
+                    {previewStrategy === "video" && !previewReady && previewVideoSrc && (
                       <div className="absolute right-4 top-4 rounded-full bg-slate-950/72 px-3 py-1 text-xs text-white">
-                        更新中…
+                        载入预览中…
+                      </div>
+                    )}
+                    {previewStrategy === "image" && (
+                      <div className="absolute right-4 top-4 rounded-full bg-slate-950/72 px-3 py-1 text-xs text-white">
+                        静态预览
                       </div>
                     )}
                   </div>
@@ -460,6 +578,12 @@ export default function VideoCut({ active = true }: { active?: boolean }) {
                       <div className="mb-2 flex flex-wrap items-center justify-between gap-2">
                         <div className="text-[11px] text-slate-400">缩略帧</div>
                         <div className="flex flex-wrap items-center gap-2">
+                          <Button variant="ghost" size="sm" className="h-7 px-2.5 text-[11px]" onClick={() => stepPreviewFrame(-1)}>
+                            上一帧
+                          </Button>
+                          <Button variant="ghost" size="sm" className="h-7 px-2.5 text-[11px]" onClick={() => stepPreviewFrame(1)}>
+                            下一帧
+                          </Button>
                           <Button variant="ghost" size="sm" className="h-7 px-2.5 text-[11px]" onClick={applyCurrentFrameToStart}>
                             设起点
                           </Button>
@@ -480,9 +604,7 @@ export default function VideoCut({ active = true }: { active?: boolean }) {
                                 activeFrame ? "border-amber-300/80 ring-1 ring-amber-300/40" : "border-white/10 hover:border-white/20"
                               )}
                               onClick={() => {
-                                clearPendingPreviewTimeout();
-                                setCurrentPreviewTime(frameTime);
-                                void loadPreviewFrame(videoPath, frameTime);
+                                syncPreviewTime(frameTime);
                               }}
                             >
                               <img src={frame} alt="" className="h-12 w-full object-cover transition group-hover:opacity-100" />
@@ -563,15 +685,14 @@ export default function VideoCut({ active = true }: { active?: boolean }) {
                         onChange={(event) => setStartTimeInput(event.target.value)}
                         onBlur={() => {
                           setEditingStart(false);
-                        const time = parseTimeInput(startTimeInput);
-                        if (time >= 0 && time <= (videoInfo?.duration || 0)) {
-                          clearPendingPreviewTimeout();
-                          startTimeRef.current = time;
-                          setStartTime(time);
-                          if (time > endTime) setEndTime(time);
-                          if (time > endTimeRef.current) endTimeRef.current = time;
-                          void loadPreviewFrame(videoPath, time);
-                        }
+                          const time = snapTimeToFrame(parseTimeInput(startTimeInput), videoInfoRef.current, "floor");
+                          if (time >= 0 && time <= (videoInfo?.duration || 0)) {
+                            startTimeRef.current = time;
+                            setStartTime(time);
+                            if (time > endTime) setEndTime(time);
+                            if (time > endTimeRef.current) endTimeRef.current = time;
+                            syncPreviewTime(time);
+                          }
                         }}
                         onKeyDown={(event) => {
                           if (event.key === "Enter") (event.target as HTMLInputElement).blur();
@@ -598,15 +719,14 @@ export default function VideoCut({ active = true }: { active?: boolean }) {
                         onChange={(event) => setEndTimeInput(event.target.value)}
                         onBlur={() => {
                           setEditingEnd(false);
-                        const time = parseTimeInput(endTimeInput);
-                        if (time >= 0 && time <= (videoInfo?.duration || 0)) {
-                          clearPendingPreviewTimeout();
-                          endTimeRef.current = time;
-                          setEndTime(time);
-                          if (time < startTime) setStartTime(time);
-                          if (time < startTimeRef.current) startTimeRef.current = time;
-                          void loadPreviewFrame(videoPath, time);
-                        }
+                          const time = snapTimeToFrame(parseTimeInput(endTimeInput), videoInfoRef.current, "ceil");
+                          if (time >= 0 && time <= (videoInfo?.duration || 0)) {
+                            endTimeRef.current = time;
+                            setEndTime(time);
+                            if (time < startTime) setStartTime(time);
+                            if (time < startTimeRef.current) startTimeRef.current = time;
+                            syncPreviewTime(time);
+                          }
                         }}
                         onKeyDown={(event) => {
                           if (event.key === "Enter") (event.target as HTMLInputElement).blur();
@@ -618,7 +738,7 @@ export default function VideoCut({ active = true }: { active?: boolean }) {
 
                   {videoInfo && (
                     <div className="text-xs text-slate-400">
-                      拖动时间轴左手柄调整开始，右手柄调整结束。
+                      拖动时间轴左手柄调整开始，右手柄调整结束。主预览会按帧吸附到当前位置。
                     </div>
                   )}
                 </div>
