@@ -3,13 +3,13 @@ mod commands;
 use commands::convert::{cancel_convert, convert_video, get_file_size};
 use commands::dedup::{cancel_dedup, delete_files, find_duplicates, get_file_thumbnail};
 use commands::file_stats::{cancel_file_stats, scan_directory};
+use commands::logger::{get_log_path, get_recent_logs};
 use commands::system::open_file_path;
 use commands::video::{
     cancel_video_cut, cut_video, cut_video_precise, generate_preview_frame,
     generate_timeline_frames, get_video_duration, get_video_info,
 };
-use commands::watermark::{batch_remove_watermark, remove_watermark, get_image_info};
-use commands::logger::{get_log_path, get_recent_logs};
+use commands::watermark::{batch_remove_watermark, get_image_info, remove_watermark};
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {

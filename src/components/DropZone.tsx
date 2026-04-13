@@ -1,3 +1,4 @@
+import type { ReactNode } from "react";
 import { open } from "@tauri-apps/plugin-dialog";
 import { useWindowDrop } from "../hooks/useWindowDrop";
 import { Badge } from "./ui/badge";
@@ -11,9 +12,10 @@ interface DropZoneProps {
   loading?: boolean;
   selectedPath?: string;
   active?: boolean;
+  footerActions?: ReactNode;
 }
 
-export default function DropZone({ onSelect, loading, selectedPath, active = true }: DropZoneProps) {
+export default function DropZone({ onSelect, loading, selectedPath, active = true, footerActions }: DropZoneProps) {
   const { dragging } = useWindowDrop({
     active,
     onDrop: (paths) => {
@@ -58,6 +60,7 @@ export default function DropZone({ onSelect, loading, selectedPath, active = tru
               <div className="truncate text-sm font-medium text-slate-800">{getBaseName(selectedPath) || selectedPath}</div>
               <div className="truncate text-xs text-slate-500">{selectedPath}</div>
             </div>
+            {footerActions && <div className="flex flex-wrap items-center gap-2">{footerActions}</div>}
           </div>
         )}
       </CardContent>

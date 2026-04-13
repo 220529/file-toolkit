@@ -37,12 +37,13 @@ export function Button({
   ...props
 }: PropsWithChildren<ButtonProps>) {
   return (
-    <button
-      className={cn(
-        "inline-flex items-center justify-center gap-2 rounded-xl font-medium transition-all duration-200 outline-none disabled:pointer-events-none disabled:opacity-45",
-        "focus-visible:ring-2 focus-visible:ring-[var(--brand-300)] focus-visible:ring-offset-2 focus-visible:ring-offset-white",
-        variantClasses[variant],
-        sizeClasses[size],
+      <button
+        className={cn(
+          "inline-flex items-center justify-center gap-2 rounded-xl font-medium transition-all duration-200 outline-none",
+          "disabled:pointer-events-none disabled:cursor-not-allowed disabled:opacity-45 disabled:saturate-50 disabled:shadow-none disabled:ring-0",
+          "focus-visible:ring-2 focus-visible:ring-[var(--brand-300)] focus-visible:ring-offset-2 focus-visible:ring-offset-white",
+          variantClasses[variant],
+          sizeClasses[size],
         className
       )}
       {...props}

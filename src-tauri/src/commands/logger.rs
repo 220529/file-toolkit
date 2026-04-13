@@ -105,7 +105,11 @@ pub fn get_log_path(app: AppHandle) -> Result<String, String> {
 
 #[tauri::command]
 pub fn get_recent_logs(app: AppHandle, lines: Option<usize>) -> Result<String, String> {
-    let log_dir = app.path().app_data_dir().map_err(|e| e.to_string())?.join("logs");
+    let log_dir = app
+        .path()
+        .app_data_dir()
+        .map_err(|e| e.to_string())?
+        .join("logs");
     let today = Local::now().format("%Y-%m-%d").to_string();
     let log_file = log_dir.join(format!("{}.log", today));
 

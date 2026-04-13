@@ -1,12 +1,12 @@
+use base64::{engine::general_purpose, Engine as _};
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::Path;
 use std::process::Command;
 use tauri::AppHandle;
-use base64::{Engine as _, engine::general_purpose};
 
 use super::ffmpeg_utils::get_ffmpeg_path;
-use super::logger::{log_info, log_error};
+use super::logger::{log_error, log_info};
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct CropResult {
@@ -35,12 +35,16 @@ fn generate_thumbnail(path: &str, app: &AppHandle) -> Result<String, String> {
 
     // 创建临时文件
     let temp_path = build_temp_thumbnail_path();
-    
+
     let output = Command::new(&ffmpeg)
         .args([
-            "-y", "-i", path,
-            "-vf", "scale=400:-1",
-            "-q:v", "5",
+            "-y",
+            "-i",
+            path,
+            "-vf",
+            "scale=400:-1",
+            "-q:v",
+            "5",
             temp_path.to_string_lossy().as_ref(),
         ])
         .output()
@@ -53,7 +57,7 @@ fn generate_thumbnail(path: &str, app: &AppHandle) -> Result<String, String> {
     // 读取并转为 base64
     let data = fs::read(&temp_path).map_err(|e| format!("读取缩略图失败: {}", e))?;
     let _ = fs::remove_file(&temp_path);
-    
+
     let base64_str = general_purpose::STANDARD.encode(&data);
     Ok(format!("data:image/jpeg;base64,{}", base64_str))
 }
@@ -70,7 +74,7 @@ fn build_temp_thumbnail_path() -> std::path::PathBuf {
 #[tauri::command]
 pub fn get_image_info(app: AppHandle, path: String) -> Result<ImageInfo, String> {
     log_info(&format!("[去水印] 获取图片信息: {}", path));
-    
+
     let path_obj = Path::new(&path);
     if !path_obj.exists() {
         log_error(&format!("[去水印] 文件不存在: {}", path));
@@ -83,10 +87,14 @@ pub fn get_image_info(app: AppHandle, path: String) -> Result<ImageInfo, String>
     // 使用 ffprobe 获取图片尺寸（跨平台）
     let output = Command::new(&ffprobe)
         .args([
-            "-v", "error",
-            "-select_streams", "v:0",
-            "-show_entries", "stream=width,height",
-            "-of", "csv=p=0:s=x",
+            "-v",
+            "error",
+            "-select_streams",
+            "v:0",
+            "-show_entries",
+            "stream=width,height",
+            "-of",
+            "csv=p=0:s=x",
             &path,
         ])
         .output()
@@ -105,18 +113,18 @@ pub fn get_image_info(app: AppHandle, path: String) -> Result<ImageInfo, String>
 
     let stdout = String::from_utf8_lossy(&output.stdout);
     let parts: Vec<&str> = stdout.trim().split('x').collect();
-    
+
     let (width, height) = if parts.len() >= 2 {
-        (
-            parts[0].parse().unwrap_or(0),
-            parts[1].parse().unwrap_or(0),
-        )
+        (parts[0].parse().unwrap_or(0), parts[1].parse().unwrap_or(0))
     } else {
         (0, 0)
     };
 
     if width == 0 || height == 0 {
-        log_error(&format!("[去水印] 无法获取图片尺寸, ffprobe 输出: {}", stdout));
+        log_error(&format!(
+            "[去水印] 无法获取图片尺寸, ffprobe 输出: {}",
+            stdout
+        ));
         return Err("无法获取图片尺寸".to_string());
     }
 
@@ -182,9 +190,13 @@ pub fn remove_watermark(
             );
             Command::new(&ffmpeg)
                 .args([
-                    "-y", "-i", &input_path,
-                    "-filter_complex", &filter,
-                    "-q:v", "1",
+                    "-y",
+                    "-i",
+                    &input_path,
+                    "-filter_complex",
+                    &filter,
+                    "-q:v",
+                    "1",
                     output_path.to_string_lossy().as_ref(),
                 ])
                 .output()
@@ -198,9 +210,13 @@ pub fn remove_watermark(
             );
             Command::new(&ffmpeg)
                 .args([
-                    "-y", "-i", &input_path,
-                    "-vf", &filter,
-                    "-q:v", "1",
+                    "-y",
+                    "-i",
+                    &input_path,
+                    "-vf",
+                    &filter,
+                    "-q:v",
+                    "1",
                     output_path.to_string_lossy().as_ref(),
                 ])
                 .output()
@@ -236,11 +252,19 @@ pub fn batch_remove_watermark(
     mode: String,
 ) -> Result<Vec<CropResult>, String> {
     let mut results = Vec::new();
-    
+
     for path in input_paths {
         match remove_watermark(
-            app.clone(), path.clone(), x, y, width, height, 
-            color.clone(), mode.clone(), vec![], 0
+            app.clone(),
+            path.clone(),
+            x,
+            y,
+            width,
+            height,
+            color.clone(),
+            mode.clone(),
+            vec![],
+            0,
         ) {
             Ok(result) => results.push(result),
             Err(e) => results.push(CropResult {
@@ -250,6 +274,6 @@ pub fn batch_remove_watermark(
             }),
         }
     }
-    
+
     Ok(results)
 }

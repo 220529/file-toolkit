@@ -5,7 +5,7 @@ use tauri::{AppHandle, Manager};
 pub fn get_ffmpeg_path(app: &AppHandle) -> PathBuf {
     // Tauri 2.0 externalBin 会把文件放到 MacOS 目录（macOS）或 exe 同目录（Windows）
     // 文件名不带平台后缀
-    
+
     let binary_name = if cfg!(target_os = "windows") {
         "ffmpeg.exe"
     } else {

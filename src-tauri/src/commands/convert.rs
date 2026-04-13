@@ -17,9 +17,12 @@ fn get_duration(app: &AppHandle, path: &str) -> Result<f64, String> {
     let ffprobe = get_ffprobe_path(app);
     let output = Command::new(&ffprobe)
         .args([
-            "-v", "error",
-            "-show_entries", "format=duration",
-            "-of", "default=noprint_wrappers=1:nokey=1",
+            "-v",
+            "error",
+            "-show_entries",
+            "format=duration",
+            "-of",
+            "default=noprint_wrappers=1:nokey=1",
             path,
         ])
         .output()
@@ -45,7 +48,10 @@ pub async fn convert_video(
     let ffmpeg = get_ffmpeg_path(&app);
     let duration = get_duration(&app, &input)?;
 
-    info!("[转换] {} -> {} ({}, 画质: {})", input, output, format, quality);
+    info!(
+        "[转换] {} -> {} ({}, 画质: {})",
+        input, output, format, quality
+    );
 
     let output_clone = output.clone();
     let output_for_cleanup = output.clone();
@@ -65,25 +71,34 @@ pub async fn convert_video(
             "-y".to_string(),
             "-i".to_string(),
             input.clone(),
-            "-threads".to_string(), "0".to_string(),
+            "-threads".to_string(),
+            "0".to_string(),
         ];
 
         if format == "gif" {
             // GIF：限制帧率和尺寸
             args.extend([
-                "-vf".to_string(), "fps=12,scale='min(480,iw)':-1:flags=lanczos".to_string(),
-                "-c:v".to_string(), "gif".to_string(),
+                "-vf".to_string(),
+                "fps=12,scale='min(480,iw)':-1:flags=lanczos".to_string(),
+                "-c:v".to_string(),
+                "gif".to_string(),
                 "-an".to_string(),
             ]);
         } else {
             // MP4/MOV：使用 libx264 软编码（兼容性最好）
             args.extend([
-                "-c:v".to_string(), "libx264".to_string(),
-                "-crf".to_string(), crf.to_string(),
-                "-preset".to_string(), "fast".to_string(),
-                "-pix_fmt".to_string(), "yuv420p".to_string(),
-                "-c:a".to_string(), "aac".to_string(),
-                "-b:a".to_string(), "192k".to_string(),
+                "-c:v".to_string(),
+                "libx264".to_string(),
+                "-crf".to_string(),
+                crf.to_string(),
+                "-preset".to_string(),
+                "fast".to_string(),
+                "-pix_fmt".to_string(),
+                "yuv420p".to_string(),
+                "-c:a".to_string(),
+                "aac".to_string(),
+                "-b:a".to_string(),
+                "192k".to_string(),
             ]);
         }
 
@@ -120,7 +135,9 @@ pub async fn convert_video(
 
         *CONVERT_PROCESS.lock().unwrap() = None;
 
-        let status = child.wait().map_err(|e| format!("等待 ffmpeg 失败: {}", e))?;
+        let status = child
+            .wait()
+            .map_err(|e| format!("等待 ffmpeg 失败: {}", e))?;
         let _ = app.emit("convert-progress", 100.0);
 
         Ok::<bool, String>(status.success())
@@ -168,7 +185,6 @@ fn parse_ffmpeg_time(time_str: &str) -> Option<f64> {
         None
     }
 }
-
 
 /// 获取文件大小
 #[tauri::command]

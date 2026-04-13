@@ -12,6 +12,7 @@ import { Card, CardContent, CardHeader, CardTitle } from "../components/ui/card"
 import { EmptyState } from "../components/ui/empty-state";
 import { Modal } from "../components/ui/modal";
 import { Progress } from "../components/ui/progress";
+import { Switch } from "../components/ui/switch";
 import { safeListen } from "../utils/tauriEvent";
 import { formatSize } from "../utils/format";
 import { cn } from "../utils/cn";
@@ -30,11 +31,21 @@ interface DuplicateGroup {
   files: FileInfo[];
 }
 
+interface DedupIssue {
+  path: string;
+  reason: string;
+}
+
 interface DedupResult {
   groups: DuplicateGroup[];
   total_groups: number;
   total_duplicates: number;
   wasted_size: number;
+  skipped_files: number;
+  unreadable_files: number;
+  permission_denied_files: number;
+  hash_failed_files: number;
+  sample_errors: DedupIssue[];
 }
 
 interface DedupProgress {
@@ -43,6 +54,20 @@ interface DedupProgress {
   current: number;
   total: number;
   percent: number;
+}
+
+interface DeleteFailure {
+  path: string;
+  reason: string;
+}
+
+interface DeleteFilesResult {
+  deleted_count: number;
+  failed: DeleteFailure[];
+}
+
+interface DeleteGroupInput {
+  files: string[];
 }
 
 interface DedupStepSnapshot {
@@ -66,8 +91,7 @@ const DEDUP_STAGE_ORDER: Record<string, number> = {
   "扫描文件": 1,
   "初步筛选重复文件": 2,
   "确认重复文件": 3,
-  "重新扫描文件夹": 4,
-  "完成": 5,
+  "完成": 4,
 };
 const VIRTUAL_OVERSCAN = 900;
 
@@ -80,7 +104,6 @@ function estimateGroupHeight(group: DuplicateGroup, expanded: boolean) {
 function getDedupProgressText(progress: DedupProgress) {
   switch (progress.stage) {
     case "准备扫描文件夹":
-    case "重新扫描文件夹":
       return "准备中";
     case "扫描文件":
       return `已扫描 ${progress.current.toLocaleString()} 个文件`;
@@ -190,31 +213,6 @@ function isPreviewable(name: string) {
   return ["jpg", "jpeg", "png", "gif", "bmp", "webp", "mp4", "mov", "avi", "mkv", "wmv", "flv", "webm"].includes(ext);
 }
 
-function SummaryCard({
-  label,
-  value,
-  tone,
-}: {
-  label: string;
-  value: string;
-  tone: "amber" | "rose" | "blue";
-}) {
-  const toneClass = {
-    amber: "from-amber-500/16 to-white",
-    rose: "from-rose-500/14 to-white",
-    blue: "from-blue-500/14 to-white",
-  }[tone];
-
-  return (
-    <Card className={`bg-gradient-to-br ${toneClass}`}>
-      <CardContent className="px-5 py-5">
-        <div className="text-xs uppercase tracking-[0.2em] text-slate-400">{label}</div>
-        <div className="mt-3 text-3xl font-semibold tracking-[-0.03em] text-slate-950">{value}</div>
-      </CardContent>
-    </Card>
-  );
-}
-
 export default function Dedup({ active = true }: { active?: boolean }) {
   const [result, setResult] = useState<DedupResult | null>(null);
   const [selected, setSelected] = useState<Set<string>>(new Set());
@@ -228,6 +226,8 @@ export default function Dedup({ active = true }: { active?: boolean }) {
   const [previewImage, setPreviewImage] = useState<string | null>(null);
   const [useTrash, setUseTrash] = useState(true);
   const [scope, setScope] = useState<DedupScope>("all");
+  const [verifyBeforeDelete, setVerifyBeforeDelete] = useState(false);
+  const [deleteFailures, setDeleteFailures] = useState<DeleteFailure[]>([]);
   const pendingGroupThumbnails = useRef(new Set<string>());
   const pendingFileThumbnails = useRef(new Set<string>());
   const currentTaskIdRef = useRef<string | null>(null);
@@ -437,6 +437,7 @@ export default function Dedup({ active = true }: { active?: boolean }) {
       setSelected(new Set());
       setExpandedGroups(new Set());
       setStepSnapshot(createEmptyStepSnapshot());
+      setDeleteFailures([]);
       itemHeightsRef.current.clear();
       setMeasureVersion((current) => current + 1);
       setProgress({
@@ -507,7 +508,7 @@ export default function Dedup({ active = true }: { active?: boolean }) {
   }
 
   async function deleteSelected() {
-    if (selected.size === 0) return;
+    if (selected.size === 0 || !result) return;
 
     const action = useTrash ? "移到回收站" : "永久删除";
     const confirmed = await confirm(
@@ -518,37 +519,68 @@ export default function Dedup({ active = true }: { active?: boolean }) {
     if (!confirmed) return;
 
     try {
-      const deleted = await invoke<number>("delete_files", {
+      const deleteResult = await invoke<DeleteFilesResult>("delete_files", {
         paths: Array.from(selected),
         useTrash,
+        groups: result.groups
+          .filter((group) => group.files.some((file) => selected.has(file.path)))
+          .map<DeleteGroupInput>((group) => ({
+            files: group.files.map((file) => file.path),
+          })),
+        verifyBeforeDelete,
       });
-      toast.success(`成功${useTrash ? "移到回收站" : "删除"} ${deleted} 个文件`);
-        if (selectedPath) {
-          const taskId = `${Date.now()}-${Math.random().toString(36).slice(2)}`;
-          currentTaskIdRef.current = taskId;
-          flushSync(() => {
-            setLoading(true);
-            setStepSnapshot(createEmptyStepSnapshot());
-            itemHeightsRef.current.clear();
-            setMeasureVersion((current) => current + 1);
-            setProgress({
-              task_id: taskId,
-              stage: "重新扫描文件夹",
-              current: 0,
-              total: 0,
-              percent: 0,
-            });
-            setGroupThumbnails(new Map());
-            setFileThumbnails(new Map());
-            pendingGroupThumbnails.current.clear();
-            pendingFileThumbnails.current.clear();
+      const failedSelection = new Set(deleteResult.failed.map((item) => item.path));
+      setDeleteFailures(deleteResult.failed);
+
+      if (deleteResult.deleted_count > 0 && deleteResult.failed.length === 0) {
+        toast.success(`成功${useTrash ? "移到回收站" : "删除"} ${deleteResult.deleted_count} 个文件`);
+      } else if (deleteResult.deleted_count > 0) {
+        toast.warning(
+          `已${useTrash ? "移到回收站" : "删除"} ${deleteResult.deleted_count} 个文件，${deleteResult.failed.length} 个未处理`
+        );
+      } else {
+        toast.error(`未能${useTrash ? "移到回收站" : "删除"}任何文件`);
+      }
+
+      if (selectedPath && deleteResult.deleted_count > 0) {
+        const taskId = `${Date.now()}-${Math.random().toString(36).slice(2)}`;
+        currentTaskIdRef.current = taskId;
+        flushSync(() => {
+          setLoading(true);
+          setStepSnapshot(createEmptyStepSnapshot());
+          itemHeightsRef.current.clear();
+          setMeasureVersion((current) => current + 1);
+          setProgress({
+            task_id: taskId,
+            stage: "准备扫描文件夹",
+            current: 0,
+            total: 0,
+            percent: 0,
           });
-          const res = await invoke<DedupResult>("find_duplicates", { path: selectedPath, taskId, scope });
-          if (currentTaskIdRef.current !== taskId) return;
-          applyResult(res);
-          setSelected(new Set());
-          setExpandedGroups(new Set());
-        }
+          setGroupThumbnails(new Map());
+          setFileThumbnails(new Map());
+          pendingGroupThumbnails.current.clear();
+          pendingFileThumbnails.current.clear();
+        });
+        const res = await invoke<DedupResult>("find_duplicates", { path: selectedPath, taskId, scope });
+        if (currentTaskIdRef.current !== taskId) return;
+        applyResult(res);
+        const remainingFailed = new Set(
+          res.groups
+            .flatMap((group) => group.files.map((file) => file.path))
+            .filter((path) => failedSelection.has(path))
+        );
+        setSelected(remainingFailed);
+        setExpandedGroups(
+          new Set(
+            res.groups
+              .filter((group) => group.files.some((file) => remainingFailed.has(file.path)))
+              .map((group) => group.hash)
+          )
+        );
+      } else {
+        setSelected(failedSelection);
+      }
     } catch (e) {
       toast.error("删除失败: " + e);
     } finally {
@@ -558,12 +590,20 @@ export default function Dedup({ active = true }: { active?: boolean }) {
   }
 
   async function cancelScan() {
-    currentTaskIdRef.current = null;
-    await invoke("cancel_dedup");
-    setLoading(false);
-    setProgress(null);
-    setStepSnapshot(createEmptyStepSnapshot());
-    toast.info("已取消扫描");
+    const taskId = currentTaskIdRef.current;
+    if (!taskId) return;
+
+    try {
+      await invoke("cancel_dedup", { taskId });
+      currentTaskIdRef.current = null;
+      setLoading(false);
+      setProgress(null);
+      setStepSnapshot(createEmptyStepSnapshot());
+      toast.info("已取消扫描");
+    } catch (e) {
+      console.error(e);
+      toast.error("取消失败: " + e);
+    }
   }
 
   useEffect(() => {
@@ -777,30 +817,110 @@ export default function Dedup({ active = true }: { active?: boolean }) {
         </Card>
       )}
 
-      {result && result.groups.length === 0 && (
-        <EmptyState
-          icon="✅"
-          title="没有发现重复文件"
-        />
-      )}
-
-      {result && result.groups.length > 0 && (
+      {result && (
         <>
-          <div className="grid grid-cols-3 gap-3">
-            <SummaryCard label="重复分组" value={result.total_groups.toLocaleString()} tone="amber" />
-            <SummaryCard label="重复文件" value={result.total_duplicates.toLocaleString()} tone="blue" />
-            <SummaryCard label="可释放空间" value={formatSize(result.wasted_size)} tone="rose" />
-          </div>
+          {result.skipped_files > 0 && (
+            <Card className="border-amber-100 bg-gradient-to-br from-amber-50/80 to-white">
+              <CardContent className="space-y-4 px-5 py-5">
+                <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
+                  <div className="min-w-0">
+                    <div className="text-sm font-semibold text-amber-900">部分文件未参与去重</div>
+                    <div
+                      className="mt-1 truncate text-sm text-amber-800/80"
+                      title={`已跳过 ${result.skipped_files.toLocaleString()} 个文件，其中无法读取 ${result.unreadable_files.toLocaleString()} 个，权限不足 ${result.permission_denied_files.toLocaleString()} 个，哈希失败 ${result.hash_failed_files.toLocaleString()} 个。结果可能不完整。`}
+                    >
+                      已跳过 {result.skipped_files.toLocaleString()} 个文件，其中无法读取{" "}
+                      {result.unreadable_files.toLocaleString()} 个，权限不足{" "}
+                      {result.permission_denied_files.toLocaleString()} 个，哈希失败{" "}
+                      {result.hash_failed_files.toLocaleString()} 个。结果可能不完整。
+                    </div>
+                  </div>
+                  <div className="flex flex-wrap gap-2">
+                    <Badge tone="warning">跳过 {result.skipped_files.toLocaleString()}</Badge>
+                    {result.permission_denied_files > 0 && (
+                      <Badge tone="warning">权限不足 {result.permission_denied_files.toLocaleString()}</Badge>
+                    )}
+                  </div>
+                </div>
+
+                {result.sample_errors.length > 0 && (
+                  <div className="space-y-2 rounded-[18px] bg-white/80 px-4 py-4 ring-1 ring-amber-100">
+                    {result.sample_errors.map((item) => (
+                      <div key={`${item.path}-${item.reason}`} className="text-sm text-slate-700">
+                        <div className="font-medium text-slate-900">{item.path}</div>
+                        <div className="mt-1 text-slate-500">{item.reason}</div>
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </CardContent>
+            </Card>
+          )}
+
+          {result.groups.length === 0 ? (
+            <EmptyState
+              icon="✅"
+              title="没有发现重复文件"
+              description={
+                result.skipped_files > 0
+                  ? `这次没有确认出重复文件，但有 ${result.skipped_files.toLocaleString()} 个文件未参与去重，请先看上方提示。`
+                  : undefined
+              }
+            />
+          ) : (
+            <>
+              <Card className="bg-[linear-gradient(135deg,rgba(255,255,255,0.96),rgba(245,248,255,0.92))]">
+            <CardContent className="px-5 py-4">
+              <div className="overflow-x-auto">
+                <div className="flex min-w-max items-center gap-3 whitespace-nowrap text-sm text-slate-600">
+                  <span className="text-xs font-medium uppercase tracking-[0.18em] text-slate-400">概览</span>
+                  <span>
+                    重复分组 <span className="font-semibold text-slate-900">{result.total_groups.toLocaleString()}</span>
+                  </span>
+                  <span className="text-slate-300">/</span>
+                  <span>
+                    重复文件 <span className="font-semibold text-slate-900">{result.total_duplicates.toLocaleString()}</span>
+                  </span>
+                  <span className="text-slate-300">/</span>
+                  <span>
+                    预计释放 <span className="font-semibold text-slate-900">{formatSize(result.wasted_size)}</span>
+                  </span>
+                  {result.skipped_files > 0 && (
+                    <>
+                      <span className="text-slate-300">/</span>
+                      <span>
+                        跳过 <span className="font-semibold text-amber-700">{result.skipped_files.toLocaleString()}</span>
+                      </span>
+                    </>
+                  )}
+                </div>
+              </div>
+            </CardContent>
+          </Card>
 
           <Card>
             <CardHeader>
-              <div>
+              <div className="min-w-0">
                 <CardTitle>清理操作</CardTitle>
+                <div
+                  className="mt-1 truncate text-sm text-slate-500"
+                  title={
+                    verifyBeforeDelete
+                      ? "当前已开启删除前完整校验，只删除与保留文件完全一致的副本。"
+                      : "当前默认直接删除，速度更快；如需更稳妥，可开启删除前完整校验。"
+                  }
+                >
+                  {verifyBeforeDelete ? "删除前会先做完整校验。" : "默认直接删除，速度更快。"}
+                </div>
               </div>
               <div className="flex items-center gap-3">
                 <label className="flex items-center gap-2 text-sm text-slate-600">
                   <input type="checkbox" checked={useTrash} onChange={(e) => setUseTrash(e.target.checked)} />
                   移到回收站
+                </label>
+                <label className="flex items-center gap-2 text-sm text-slate-600">
+                  <Switch checked={verifyBeforeDelete} onCheckedChange={setVerifyBeforeDelete} />
+                  删除前完整校验
                 </label>
                 <Button variant="secondary" onClick={autoSelect}>
                   智能选择
@@ -810,6 +930,20 @@ export default function Dedup({ active = true }: { active?: boolean }) {
                 </Button>
               </div>
             </CardHeader>
+            {deleteFailures.length > 0 && (
+              <CardContent className="border-t border-amber-100 bg-amber-50/70 px-5 py-4">
+                <div className="text-sm text-amber-900">
+                  有 {deleteFailures.length} 个文件未处理，通常是权限不足、文件被占用或已不存在。
+                </div>
+                <div className="mt-2 space-y-1 text-xs text-amber-800/80">
+                  {deleteFailures.slice(0, 3).map((item) => (
+                    <div key={`${item.path}-${item.reason}`} className="truncate" title={`${item.path} · ${item.reason}`}>
+                      {item.path} · {item.reason}
+                    </div>
+                  ))}
+                </div>
+              </CardContent>
+            )}
           </Card>
 
           <div ref={listContainerRef} className="relative" style={{ height: `${virtualState.totalHeight}px` }}>
@@ -875,7 +1009,7 @@ export default function Dedup({ active = true }: { active?: boolean }) {
                         </div>
                       </div>
                     </div>
-                    <Badge tone="warning">可释放 {formatSize(group.size * (group.files.length - 1))}</Badge>
+                    <Badge tone="warning">预计释放 {formatSize(group.size * (group.files.length - 1))}</Badge>
                   </CardHeader>
                   {expanded && (
                   <CardContent className="space-y-2 px-3 py-3">
@@ -898,6 +1032,7 @@ export default function Dedup({ active = true }: { active?: boolean }) {
                         <input
                           type="checkbox"
                           checked={selected.has(file.path)}
+                          onClick={(event) => event.stopPropagation()}
                           onChange={() => toggleSelect(file.path)}
                           className="h-4 w-4 rounded"
                         />
@@ -963,7 +1098,8 @@ export default function Dedup({ active = true }: { active?: boolean }) {
               );
             })}
           </div>
-
+            </>
+          )}
         </>
       )}
 
