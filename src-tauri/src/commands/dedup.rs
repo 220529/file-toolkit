@@ -882,7 +882,10 @@ fn calculate_full_hash(path: &Path) -> Result<String, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::atomic::{AtomicUsize, Ordering};
     use std::time::{SystemTime, UNIX_EPOCH};
+
+    static NEXT_TEST_ID: AtomicUsize = AtomicUsize::new(0);
 
     struct TestDir {
         path: PathBuf,
@@ -891,8 +894,9 @@ mod tests {
     impl TestDir {
         fn new() -> Self {
             let unique = format!(
-                "dedup-test-{}-{}",
+                "dedup-test-{}-{}-{}",
                 std::process::id(),
+                NEXT_TEST_ID.fetch_add(1, Ordering::Relaxed),
                 SystemTime::now()
                     .duration_since(UNIX_EPOCH)
                     .unwrap_or_default()

@@ -8,6 +8,7 @@ import { TaskCenterProvider } from "./components/TaskCenter";
 import { ToastProvider } from "./components/Toast";
 import LogViewer from "./components/LogViewer";
 import Dedup from "./pages/Dedup";
+import BatchVideoTrim from "./pages/BatchVideoTrim";
 import FileStats from "./pages/FileStats";
 import VideoConvert from "./pages/VideoConvert";
 import VideoCut from "./pages/VideoCut";
@@ -15,12 +16,13 @@ import Watermark from "./pages/Watermark";
 import { cn } from "./utils/cn";
 import "./index.css";
 
-type Tab = "stats" | "dedup" | "video-cut" | "video-convert" | "watermark";
+type Tab = "stats" | "dedup" | "video-cut" | "batch-video-trim" | "video-convert" | "watermark";
 
 const tabMeta: Record<Tab, { label: string; icon: string }> = {
   stats: { label: "文件统计", icon: "📊" },
   dedup: { label: "文件去重", icon: "🧬" },
   "video-cut": { label: "视频截取", icon: "✂️" },
+  "batch-video-trim": { label: "批量去头", icon: "⏭️" },
   "video-convert": { label: "格式转换", icon: "🎞️" },
   watermark: { label: "水印处理", icon: "🪄" },
 };
@@ -212,6 +214,9 @@ function App() {
                 </div>
                 <div className={activeTab === "video-cut" ? "" : "hidden"}>
                   <VideoCut key={`video-${resetKey}`} active={activeTab === "video-cut"} />
+                </div>
+                <div className={activeTab === "batch-video-trim" ? "" : "hidden"}>
+                  <BatchVideoTrim key={`batch-video-${resetKey}`} active={activeTab === "batch-video-trim"} />
                 </div>
                 <div className={activeTab === "video-convert" ? "" : "hidden"}>
                   <VideoConvert key={`convert-${resetKey}`} active={activeTab === "video-convert"} />

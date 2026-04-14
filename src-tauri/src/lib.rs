@@ -6,8 +6,9 @@ use commands::file_stats::{cancel_file_stats, scan_directory};
 use commands::logger::{get_log_path, get_recent_logs};
 use commands::system::open_file_path;
 use commands::video::{
-    cancel_video_cut, cut_video, cut_video_precise, generate_preview_frame,
-    generate_timeline_frames, get_video_duration, get_video_info,
+    batch_trim_videos, cancel_batch_video_trim, cancel_video_cut, collect_batch_video_files,
+    cut_video, cut_video_precise, generate_preview_frame, generate_timeline_frames,
+    get_video_duration, get_video_info,
 };
 use commands::watermark::{batch_remove_watermark, get_image_info, remove_watermark};
 
@@ -37,6 +38,9 @@ pub fn run() {
             generate_preview_frame,
             generate_timeline_frames,
             cancel_video_cut,
+            collect_batch_video_files,
+            batch_trim_videos,
+            cancel_batch_video_trim,
             convert_video,
             cancel_convert,
             get_image_info,
