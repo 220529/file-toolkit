@@ -120,6 +120,14 @@ fn output_needs_faststart(path: &str) -> bool {
     )
 }
 
+fn progress_percent(current: f64, duration: f64) -> f64 {
+    if !duration.is_finite() || duration <= 0.0 {
+        return 0.0;
+    }
+
+    (current / duration * 100.0).clamp(0.0, 100.0)
+}
+
 fn generate_preview_frame_with_options(
     app: &AppHandle,
     path: &str,
@@ -421,6 +429,7 @@ fn create_unique_output_path(
     ))
 }
 
+#[allow(clippy::too_many_arguments)]
 fn emit_batch_progress(
     app: &AppHandle,
     task_id: &str,
@@ -606,16 +615,16 @@ where
             if let Some(time_str) = line.strip_prefix("out_time_ms=") {
                 if let Ok(ms) = time_str.parse::<i64>() {
                     let current = ms as f64 / 1_000_000.0;
-                    on_progress((current / duration * 100.0).min(100.0).max(0.0));
+                    on_progress(progress_percent(current, duration));
                 }
             } else if let Some(time_str) = line.strip_prefix("out_time_us=") {
                 if let Ok(us) = time_str.parse::<i64>() {
                     let current = us as f64 / 1_000_000.0;
-                    on_progress((current / duration * 100.0).min(100.0).max(0.0));
+                    on_progress(progress_percent(current, duration));
                 }
             } else if let Some(time_str) = line.strip_prefix("out_time=") {
                 if let Some(secs) = parse_ffmpeg_time(time_str) {
-                    on_progress((secs / duration * 100.0).min(100.0).max(0.0));
+                    on_progress(progress_percent(secs, duration));
                 }
             }
         }
@@ -701,6 +710,7 @@ pub fn collect_batch_video_files(inputs: Vec<String>) -> Result<Vec<BatchVideoFi
 }
 
 #[tauri::command]
+#[allow(clippy::too_many_arguments)]
 pub async fn batch_trim_videos(
     app: AppHandle,
     task_id: String,
@@ -1088,18 +1098,18 @@ pub async fn cut_video_precise(
                 if let Some(time_str) = line.strip_prefix("out_time_ms=") {
                     if let Ok(ms) = time_str.parse::<i64>() {
                         let current = ms as f64 / 1_000_000.0;
-                        let progress = (current / duration * 100.0).min(100.0).max(0.0);
+                        let progress = progress_percent(current, duration);
                         let _ = app.emit("video-progress", progress);
                     }
                 } else if let Some(time_str) = line.strip_prefix("out_time_us=") {
                     if let Ok(us) = time_str.parse::<i64>() {
                         let current = us as f64 / 1_000_000.0;
-                        let progress = (current / duration * 100.0).min(100.0).max(0.0);
+                        let progress = progress_percent(current, duration);
                         let _ = app.emit("video-progress", progress);
                     }
                 } else if let Some(time_str) = line.strip_prefix("out_time=") {
                     if let Some(secs) = parse_ffmpeg_time(time_str) {
-                        let progress = (secs / duration * 100.0).min(100.0).max(0.0);
+                        let progress = progress_percent(secs, duration);
                         let _ = app.emit("video-progress", progress);
                     }
                 }

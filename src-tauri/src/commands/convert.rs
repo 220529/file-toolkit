@@ -127,7 +127,7 @@ pub async fn convert_video(
 
             if let Some(time_str) = line.strip_prefix("out_time=") {
                 if let Some(secs) = parse_ffmpeg_time(time_str) {
-                    let progress = (secs / duration * 100.0).min(100.0).max(0.0);
+                    let progress = (secs / duration * 100.0).clamp(0.0, 100.0);
                     let _ = app.emit("convert-progress", progress);
                 }
             }

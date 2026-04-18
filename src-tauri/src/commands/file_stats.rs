@@ -77,9 +77,8 @@ fn push_scan_issue(
     });
 }
 
-fn emit_progress<F>(
-    emit: &mut F,
-    task_id: &str,
+struct EmitProgressArgs<'a> {
+    task_id: &'a str,
     stage: String,
     current: u64,
     total: u64,
@@ -87,27 +86,30 @@ fn emit_progress<F>(
     elapsed: Duration,
     skipped_files: u64,
     permission_denied_files: u64,
-) where
+}
+
+fn emit_progress<F>(emit: &mut F, args: EmitProgressArgs<'_>)
+where
     F: FnMut(FileStatsProgress),
 {
-    let elapsed_ms = elapsed.as_millis().min(u64::MAX as u128) as u64;
-    let processed = current.saturating_add(skipped_files);
-    let files_per_second = if elapsed.as_secs_f64() > 0.0 {
-        processed as f64 / elapsed.as_secs_f64()
+    let elapsed_ms = args.elapsed.as_millis().min(u64::MAX as u128) as u64;
+    let processed = args.current.saturating_add(args.skipped_files);
+    let files_per_second = if args.elapsed.as_secs_f64() > 0.0 {
+        processed as f64 / args.elapsed.as_secs_f64()
     } else {
         0.0
     };
 
     emit(FileStatsProgress {
-        task_id: task_id.to_string(),
-        stage,
-        current,
-        total,
-        percent,
+        task_id: args.task_id.to_string(),
+        stage: args.stage,
+        current: args.current,
+        total: args.total,
+        percent: args.percent,
         elapsed_ms,
         files_per_second,
-        skipped_files,
-        permission_denied_files,
+        skipped_files: args.skipped_files,
+        permission_denied_files: args.permission_denied_files,
     });
 }
 
@@ -138,14 +140,16 @@ where
 
     emit_progress(
         &mut emit,
-        task_id,
-        "扫描文件".into(),
-        0,
-        0,
-        0.0,
-        scan_start.elapsed(),
-        skipped_files,
-        permission_denied_files,
+        EmitProgressArgs {
+            task_id,
+            stage: "扫描文件".into(),
+            current: 0,
+            total: 0,
+            percent: 0.0,
+            elapsed: scan_start.elapsed(),
+            skipped_files,
+            permission_denied_files,
+        },
     );
 
     for entry_result in WalkDir::new(path).into_iter() {
@@ -213,14 +217,16 @@ where
             last_progress_emit = Instant::now();
             emit_progress(
                 &mut emit,
-                task_id,
-                "扫描文件".into(),
-                total_files,
-                0,
-                0.0,
-                scan_start.elapsed(),
-                skipped_files,
-                permission_denied_files,
+                EmitProgressArgs {
+                    task_id,
+                    stage: "扫描文件".into(),
+                    current: total_files,
+                    total: 0,
+                    percent: 0.0,
+                    elapsed: scan_start.elapsed(),
+                    skipped_files,
+                    permission_denied_files,
+                },
             );
         }
     }
@@ -249,14 +255,16 @@ where
     let processed_total = total_files.saturating_add(skipped_files);
     emit_progress(
         &mut emit,
-        task_id,
-        format!("扫描完成，耗时 {:.1}s", scan_start.elapsed().as_secs_f64()),
-        total_files,
-        processed_total.max(1),
-        100.0,
-        scan_start.elapsed(),
-        skipped_files,
-        permission_denied_files,
+        EmitProgressArgs {
+            task_id,
+            stage: format!("扫描完成，耗时 {:.1}s", scan_start.elapsed().as_secs_f64()),
+            current: total_files,
+            total: processed_total.max(1),
+            percent: 100.0,
+            elapsed: scan_start.elapsed(),
+            skipped_files,
+            permission_denied_files,
+        },
     );
 
     Ok(ScanResult {

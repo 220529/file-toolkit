@@ -116,6 +116,104 @@ fn build_file_info(path: &Path, meta: &std::fs::Metadata) -> FileInfo {
     }
 }
 
+const APPLEDOUBLE_MAGIC: [u8; 4] = [0x00, 0x05, 0x16, 0x07];
+
+#[cfg(unix)]
+fn appledouble_sibling_path(path: &Path) -> Option<PathBuf> {
+    use std::ffi::OsString;
+    use std::os::unix::ffi::{OsStrExt, OsStringExt};
+
+    let file_name = path.file_name()?;
+    let sibling_name = file_name.as_bytes().strip_prefix(b"._")?;
+    if sibling_name.is_empty() {
+        return None;
+    }
+
+    Some(
+        path.parent()?
+            .join(OsString::from_vec(sibling_name.to_vec())),
+    )
+}
+
+#[cfg(not(unix))]
+fn appledouble_sibling_path(path: &Path) -> Option<PathBuf> {
+    let file_name = path.file_name()?.to_string_lossy();
+    let sibling_name = file_name.strip_prefix("._")?;
+    if sibling_name.is_empty() {
+        return None;
+    }
+
+    Some(path.parent()?.join(sibling_name))
+}
+
+fn has_appledouble_magic(path: &Path) -> bool {
+    let mut header = [0u8; APPLEDOUBLE_MAGIC.len()];
+    let Ok(mut file) = File::open(path) else {
+        return false;
+    };
+    let Ok(()) = file.read_exact(&mut header) else {
+        return false;
+    };
+    header == APPLEDOUBLE_MAGIC
+}
+
+fn is_appledouble_sidecar(path: &Path) -> bool {
+    let Some(sibling_path) = appledouble_sibling_path(path) else {
+        return false;
+    };
+
+    sibling_path.exists() || has_appledouble_magic(path)
+}
+
+fn should_skip_dedup_file(path: &Path) -> bool {
+    is_appledouble_sidecar(path)
+}
+
+fn delete_path(path: &str, use_trash: bool) -> Result<(), trash::Error> {
+    if use_trash {
+        move_to_trash(path)
+    } else {
+        fs::remove_file(path).map_err(|error| trash::Error::Unknown {
+            description: error.to_string(),
+        })
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn move_to_trash(path: &str) -> Result<(), trash::Error> {
+    use trash::macos::{DeleteMethod, TrashContextExtMacos};
+    use trash::TrashContext;
+
+    let mut finder_ctx = TrashContext::new();
+    finder_ctx.set_delete_method(DeleteMethod::Finder);
+
+    match finder_ctx.delete(path) {
+        Ok(()) => Ok(()),
+        Err(finder_error) => {
+            debug!(
+                "[删除] Finder 回收站失败，尝试 NSFileManager: {} ({})",
+                path, finder_error
+            );
+
+            let mut fallback_ctx = TrashContext::new();
+            fallback_ctx.set_delete_method(DeleteMethod::NsFileManager);
+            fallback_ctx
+                .delete(path)
+                .map_err(|fallback_error| trash::Error::Unknown {
+                    description: format!(
+                        "Finder 回收站失败: {}; NSFileManager 回收站失败: {}",
+                        finder_error, fallback_error
+                    ),
+                })
+        }
+    }
+}
+
+#[cfg(not(target_os = "macos"))]
+fn move_to_trash(path: &str) -> Result<(), trash::Error> {
+    trash::delete(path)
+}
+
 fn verify_deletion_candidates(
     selected_paths: &[String],
     groups: &[DeleteGroupInput],
@@ -360,6 +458,10 @@ pub async fn find_duplicates(
                 continue;
             }
 
+            if should_skip_dedup_file(entry.path()) {
+                continue;
+            }
+
             if !matches_scope(entry.path(), &scope) {
                 continue;
             }
@@ -448,23 +550,23 @@ pub async fn find_duplicates(
 
                 let current = progress_counter.fetch_add(1, Ordering::Relaxed) + 1;
                 let last = last_reported.load(Ordering::Relaxed);
-                if current > last && (current - last >= 20 || current == total_to_sample) {
-                    if last_reported
+                if current > last
+                    && (current - last >= 20 || current == total_to_sample)
+                    && last_reported
                         .compare_exchange(last, current, Ordering::SeqCst, Ordering::Relaxed)
                         .is_ok()
-                    {
-                        let percent = (current as f64 / total_to_sample as f64) * 70.0;
-                        let _ = app_clone.emit(
-                            "dedup-progress",
-                            DedupProgress {
-                                task_id: task_id.clone(),
-                                stage: "初步筛选重复文件".into(),
-                                current,
-                                total: total_to_sample,
-                                percent,
-                            },
-                        );
-                    }
+                {
+                    let percent = (current as f64 / total_to_sample as f64) * 70.0;
+                    let _ = app_clone.emit(
+                        "dedup-progress",
+                        DedupProgress {
+                            task_id: task_id.clone(),
+                            stage: "初步筛选重复文件".into(),
+                            current,
+                            total: total_to_sample,
+                            percent,
+                        },
+                    );
                 }
 
                 Some(result)
@@ -521,23 +623,23 @@ pub async fn find_duplicates(
 
                 let current = progress_counter.fetch_add(1, Ordering::Relaxed) + 1;
                 let last = last_reported.load(Ordering::Relaxed);
-                if current > last && (current - last >= 20 || current == total_to_hash) {
-                    if last_reported
+                if current > last
+                    && (current - last >= 20 || current == total_to_hash)
+                    && last_reported
                         .compare_exchange(last, current, Ordering::SeqCst, Ordering::Relaxed)
                         .is_ok()
-                    {
-                        let percent = 70.0 + (current as f64 / total_to_hash as f64) * 30.0;
-                        let _ = app_clone.emit(
-                            "dedup-progress",
-                            DedupProgress {
-                                task_id: task_id.clone(),
-                                stage: "确认重复文件".into(),
-                                current,
-                                total: total_to_hash,
-                                percent,
-                            },
-                        );
-                    }
+                {
+                    let percent = 70.0 + (current as f64 / total_to_hash as f64) * 30.0;
+                    let _ = app_clone.emit(
+                        "dedup-progress",
+                        DedupProgress {
+                            task_id: task_id.clone(),
+                            stage: "确认重复文件".into(),
+                            current,
+                            total: total_to_hash,
+                            percent,
+                        },
+                    );
                 }
 
                 Some(result)
@@ -659,13 +761,7 @@ pub fn delete_files(
     let mut deleted_count = 0u32;
 
     for path in verified_paths {
-        let delete_result = if use_trash {
-            trash::delete(&path)
-        } else {
-            fs::remove_file(&path).map_err(|error| trash::Error::Unknown {
-                description: error.to_string(),
-            })
-        };
+        let delete_result = delete_path(&path, use_trash);
 
         match delete_result {
             Ok(()) => {
@@ -1043,5 +1139,76 @@ mod tests {
         assert!(keep.exists());
         assert!(!duplicate.exists());
         assert!(mismatch.exists());
+    }
+
+    #[test]
+    fn appledouble_sidecar_is_skipped_when_matching_file_exists() {
+        let temp_dir = TestDir::new();
+        let original = temp_dir.path().join("photo.jpg");
+        let sidecar = temp_dir.path().join("._photo.jpg");
+
+        fs::write(&original, b"photo").expect("failed to write original file");
+        fs::write(&sidecar, b"sidecar").expect("failed to write sidecar file");
+
+        assert!(is_appledouble_sidecar(&sidecar));
+        assert!(should_skip_dedup_file(&sidecar));
+        assert!(!should_skip_dedup_file(&original));
+    }
+
+    #[test]
+    fn standalone_appledouble_file_is_skipped_by_magic_header() {
+        let temp_dir = TestDir::new();
+        let standalone = temp_dir.path().join("._lonely.jpg");
+
+        let mut payload = Vec::from(APPLEDOUBLE_MAGIC);
+        payload.extend_from_slice(b"Mac OS X");
+        fs::write(&standalone, payload).expect("failed to write standalone file");
+
+        assert!(is_appledouble_sidecar(&standalone));
+        assert!(should_skip_dedup_file(&standalone));
+    }
+
+    #[test]
+    fn standalone_dot_underscore_file_without_appledouble_header_is_not_skipped() {
+        let temp_dir = TestDir::new();
+        let standalone = temp_dir.path().join("._lonely.jpg");
+
+        fs::write(&standalone, b"standalone").expect("failed to write standalone file");
+
+        assert!(!is_appledouble_sidecar(&standalone));
+        assert!(!should_skip_dedup_file(&standalone));
+    }
+
+    #[test]
+    fn appledouble_sidecar_for_directory_is_skipped() {
+        let temp_dir = TestDir::new();
+        let original_dir = temp_dir.path().join("album");
+        let sidecar = temp_dir.path().join("._album");
+
+        fs::create_dir(&original_dir).expect("failed to create directory");
+        fs::write(&sidecar, b"sidecar").expect("failed to write directory sidecar");
+
+        assert!(is_appledouble_sidecar(&sidecar));
+        assert!(should_skip_dedup_file(&sidecar));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn appledouble_sibling_path_handles_non_utf8_names() {
+        use std::ffi::{OsStr, OsString};
+        use std::os::unix::ffi::{OsStrExt, OsStringExt};
+
+        let temp_dir = TestDir::new();
+        let sidecar = temp_dir.path().join(OsString::from_vec(vec![
+            b'.', b'_', 0xFF, b'p', b'h', b'o', b't', b'o',
+        ]));
+        let sibling =
+            appledouble_sibling_path(&sidecar).expect("non-utf8 sidecar should resolve sibling");
+
+        assert_eq!(sibling.parent(), Some(temp_dir.path()));
+        assert_eq!(
+            sibling.file_name(),
+            Some(OsStr::from_bytes(&[0xFF, b'p', b'h', b'o', b't', b'o']))
+        );
     }
 }
