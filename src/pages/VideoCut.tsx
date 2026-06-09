@@ -1,13 +1,24 @@
 import { useEffect, useRef, useState, type PointerEvent as ReactPointerEvent, type SyntheticEvent, type WheelEvent as ReactWheelEvent } from "react";
-import { convertFileSrc, invoke } from "@tauri-apps/api/core";
+import { convertFileSrc } from "@tauri-apps/api/core";
 import { dirname, normalize, resolve } from "@tauri-apps/api/path";
 import { open, save } from "@tauri-apps/plugin-dialog";
-import { exists, stat } from "@tauri-apps/plugin-fs";
+import {
+  cancelVideoCut,
+  cutVideo,
+  generatePreviewFrame,
+  generateTimelineFrames,
+  getPathMetadata,
+  getVideoInfo,
+  pathExists,
+  type PathMetadata,
+  type VideoInfo,
+} from "../api/tauri";
 import { useTaskReporter } from "../components/TaskCenter";
 import { useToast } from "../components/Toast";
 import { Badge } from "../components/ui/badge";
 import { Button } from "../components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "../components/ui/card";
+import { Icon } from "../components/ui/icon";
 import { Input } from "../components/ui/input";
 import { Progress } from "../components/ui/progress";
 import { Switch } from "../components/ui/switch";
@@ -15,13 +26,6 @@ import { useWindowDrop } from "../hooks/useWindowDrop";
 import { cn } from "../utils/cn";
 import { safeListen } from "../utils/tauriEvent";
 import { getBaseName, getExtension, stripExtension } from "../utils/path";
-
-interface VideoInfo {
-  duration: number;
-  width: number;
-  height: number;
-  fps: number;
-}
 
 type TimelineDragMode = "playhead" | "start" | "end";
 type PlaybackMode = "manual" | "clip";
@@ -238,7 +242,7 @@ export default function VideoCut({ active = true }: { active?: boolean }) {
   useEffect(() => {
     if (!active) return;
 
-    return safeListen<number>("video-progress", (event) => {
+    return safeListen("video-progress", (event) => {
       setProgress(event.payload);
     });
   }, [active]);
@@ -743,7 +747,7 @@ export default function VideoCut({ active = true }: { active?: boolean }) {
 
   async function ensureVideoPathAvailable(path: string, actionLabel: string) {
     try {
-      const available = await exists(path);
+      const available = await pathExists(path);
       if (!available) {
         toast.error(`${actionLabel}失败：视频文件不存在，可能已被移动或外接磁盘已断开`);
       }
@@ -757,9 +761,8 @@ export default function VideoCut({ active = true }: { active?: boolean }) {
 
   async function buildVideoCacheKey(path: string) {
     try {
-      const info = await stat(path);
-      const mtime = info.mtime instanceof Date ? info.mtime.getTime() : 0;
-      return `${path}::${info.size}::${mtime}`;
+      const info: PathMetadata = await getPathMetadata(path);
+      return `${path}::${info.size}::${info.modified_ms}`;
     } catch (error) {
       console.error("读取视频文件信息失败，回退为路径缓存键:", error);
       return path;
@@ -793,7 +796,7 @@ export default function VideoCut({ active = true }: { active?: boolean }) {
     if (!lastOutputDir) return fileName;
 
     try {
-      const dirAvailable = await exists(lastOutputDir);
+      const dirAvailable = await pathExists(lastOutputDir);
       if (!dirAvailable) return fileName;
       return await resolve(lastOutputDir, fileName);
     } catch (error) {
@@ -1143,7 +1146,7 @@ export default function VideoCut({ active = true }: { active?: boolean }) {
     setCurrentPreviewTime(0);
     setProgress(0);
     try {
-      const info = await invoke<VideoInfo>("get_video_info", { path });
+      const info: VideoInfo = await getVideoInfo(path);
       if (loadRequestIdRef.current !== loadRequestId) return;
       setVideoInfo(info);
       startTimeRef.current = 0;
@@ -1186,7 +1189,7 @@ export default function VideoCut({ active = true }: { active?: boolean }) {
     setLoadingPreview(true);
     setPreviewFrameError(false);
     try {
-      const frame = await invoke<string>("generate_preview_frame", { path, time: snappedTime });
+      const frame = await generatePreviewFrame(path, snappedTime);
       if (previewRequestIdRef.current !== requestId) return;
       setPreviewFrame(frame);
       setPreviewFrameError(false);
@@ -1244,7 +1247,7 @@ export default function VideoCut({ active = true }: { active?: boolean }) {
     setLoadingTimelineFrames(true);
     setTimelineFramesError(false);
     try {
-      const frames = await invoke<string[]>("generate_timeline_frames", { path, count });
+      const frames = await generateTimelineFrames(path, count);
       if (timelineRequestIdRef.current !== requestId) return;
       setTimelineFrames(frames);
       timelineFramesCacheRef.current.set(cacheKey, frames);
@@ -1340,8 +1343,8 @@ export default function VideoCut({ active = true }: { active?: boolean }) {
     setProcessing(true);
     setProgress(0);
     try {
-      const command = preciseMode ? "cut_video_precise" : "cut_video";
-      await invoke(command, {
+      await cutVideo({
+        precise: preciseMode,
         input: currentVideoPath,
         output: finalOutputPath,
         startTime: currentStartTime,
@@ -1363,7 +1366,7 @@ export default function VideoCut({ active = true }: { active?: boolean }) {
   }
 
   async function cancelCut() {
-    await invoke("cancel_video_cut");
+    await cancelVideoCut();
     setProcessing(false);
     setProgress(0);
   }
@@ -1480,8 +1483,8 @@ export default function VideoCut({ active = true }: { active?: boolean }) {
                 onClick={selectVideo}
                 className={cn("drop-zone flex flex-col items-center justify-center", dragging && "dragging")}
               >
-                <div className="mb-4 flex h-16 w-16 items-center justify-center rounded-[22px] bg-white text-3xl shadow-[0_16px_34px_rgba(15,23,42,0.08)]">
-                  {dragging ? "📂" : "🎬"}
+                <div className="mb-4 flex h-12 w-12 items-center justify-center rounded-[8px] border border-slate-200 bg-slate-50 text-[var(--brand-700)]">
+                  <Icon name={dragging ? "folderOpen" : "video"} size={30} />
                 </div>
                 <div className="text-lg font-semibold text-slate-900">{dragging ? "松开以载入视频" : "拖入视频，或点击选择"}</div>
               </div>
@@ -1752,7 +1755,7 @@ export default function VideoCut({ active = true }: { active?: boolean }) {
                     <div
                       ref={timelineRef}
                       className={cn(
-                        "relative h-14 overflow-hidden rounded-2xl border bg-[linear-gradient(180deg,rgba(15,23,42,0.82),rgba(30,41,59,0.92))] select-none touch-none transition",
+                        "relative h-14 overflow-hidden rounded-[10px] border bg-[linear-gradient(180deg,rgba(15,23,42,0.82),rgba(30,41,59,0.92))] select-none touch-none transition",
                         timelineDragMode ? "border-amber-300/40 ring-1 ring-amber-300/20" : "border-white/10"
                       )}
                       onPointerDown={handleTimelinePointerDown}
@@ -1977,7 +1980,7 @@ export default function VideoCut({ active = true }: { active?: boolean }) {
                   )}
                 </div>
 
-                <div className="rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3">
+                <div className="rounded-[10px] border border-slate-200 bg-slate-50 px-4 py-3">
                   <div className="mb-3 text-sm font-medium text-slate-800">重置</div>
                   <div className="grid gap-2">
                     <Button
@@ -1996,7 +1999,7 @@ export default function VideoCut({ active = true }: { active?: boolean }) {
                   </div>
                 </div>
 
-                <div className="rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3">
+                <div className="rounded-[10px] border border-slate-200 bg-slate-50 px-4 py-3">
                   <div className="flex items-center justify-between gap-3">
                     <div>
                       <div className="text-sm font-medium text-slate-800">精确模式</div>
@@ -2028,7 +2031,7 @@ export default function VideoCut({ active = true }: { active?: boolean }) {
                 </div>
 
                 {processing && preciseMode && (
-                  <div className="space-y-2 rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3">
+                  <div className="space-y-2 rounded-[10px] border border-slate-200 bg-slate-50 px-4 py-3">
                     <div className="flex items-center justify-between text-sm">
                       <span className="text-slate-800">正在编码</span>
                       <span className="font-mono text-[var(--brand-600)]">{progress.toFixed(1)}%</span>

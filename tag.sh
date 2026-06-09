@@ -59,9 +59,17 @@ sed -i '' "s/\"version\": \"[^\"]*\"/\"version\": \"$VERSION_NUM\"/" src-tauri/t
 echo "📝 更新 package.json..."
 sed -i '' "s/\"version\": \"[^\"]*\"/\"version\": \"$VERSION_NUM\"/" package.json
 
+# 更新 Cargo.toml 版本号
+echo "📝 更新 Cargo.toml..."
+sed -i '' "0,/^version = \"[^\"]*\"/s//version = \"$VERSION_NUM\"/" src-tauri/Cargo.toml
+
+# 同步 Cargo.lock 中的本地包版本
+echo "📝 更新 Cargo.lock..."
+cargo check --manifest-path src-tauri/Cargo.toml >/dev/null
+
 # 检查是否有变更需要提交
-if ! git diff --quiet src-tauri/tauri.conf.json package.json; then
-  git add src-tauri/tauri.conf.json package.json
+if ! git diff --quiet src-tauri/tauri.conf.json package.json src-tauri/Cargo.toml src-tauri/Cargo.lock; then
+  git add src-tauri/tauri.conf.json package.json src-tauri/Cargo.toml src-tauri/Cargo.lock
   git commit -m "chore: bump version to $NEW_VERSION"
 fi
 

@@ -3,7 +3,7 @@ use log::{LevelFilter, Metadata, Record};
 use std::fs::{self, OpenOptions};
 use std::io::Write;
 use std::path::PathBuf;
-use std::sync::{Mutex, Once};
+use std::sync::{Mutex, MutexGuard, Once};
 use tauri::{AppHandle, Manager};
 
 lazy_static::lazy_static! {
@@ -14,6 +14,12 @@ static LOGGER: AppLogger = AppLogger;
 static LOGGER_INIT: Once = Once::new();
 
 struct AppLogger;
+
+fn lock_log_path() -> MutexGuard<'static, Option<PathBuf>> {
+    LOG_PATH
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
 
 impl log::Log for AppLogger {
     fn enabled(&self, metadata: &Metadata) -> bool {
@@ -30,7 +36,7 @@ impl log::Log for AppLogger {
 
         eprintln!("{}", line);
 
-        if let Some(path) = LOG_PATH.lock().unwrap().as_ref() {
+        if let Some(path) = lock_log_path().as_ref() {
             let _ = append_log_line(path, &line);
         }
     }
@@ -51,7 +57,7 @@ pub fn init_logger(app: &AppHandle) {
 
         let today = Local::now().format("%Y-%m-%d").to_string();
         let log_file = log_dir.join(format!("{}.log", today));
-        *LOG_PATH.lock().unwrap() = Some(log_file);
+        *lock_log_path() = Some(log_file);
 
         cleanup_old_logs(&log_dir, 7);
     }

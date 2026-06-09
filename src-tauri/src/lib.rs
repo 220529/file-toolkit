@@ -3,21 +3,23 @@ mod commands;
 use commands::convert::{cancel_convert, convert_video, get_file_size};
 use commands::dedup::{cancel_dedup, delete_files, find_duplicates, get_file_thumbnail};
 use commands::file_stats::{cancel_file_stats, scan_directory};
+use commands::image_generation::{generate_image, get_image_generation_config};
 use commands::logger::{get_log_path, get_recent_logs};
-use commands::system::open_file_path;
+use commands::system::{get_path_metadata, open_file_path, path_exists, reveal_file_path};
 use commands::video::{
     batch_trim_videos, cancel_batch_video_trim, cancel_video_cut, collect_batch_video_files,
     cut_video, cut_video_precise, generate_preview_frame, generate_timeline_frames,
     get_video_duration, get_video_info,
 };
-use commands::watermark::{batch_remove_watermark, get_image_info, remove_watermark};
+use commands::watermark::{
+    batch_remove_watermark, cancel_watermark_task, get_image_info, remove_watermark,
+};
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
-        .plugin(tauri_plugin_fs::init())
         .setup(|app| {
             // 初始化文件日志
             commands::logger::init_logger(app.handle());
@@ -46,10 +48,16 @@ pub fn run() {
             get_image_info,
             remove_watermark,
             batch_remove_watermark,
+            cancel_watermark_task,
             get_file_size,
             get_log_path,
             get_recent_logs,
             open_file_path,
+            reveal_file_path,
+            path_exists,
+            get_path_metadata,
+            get_image_generation_config,
+            generate_image,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

@@ -15,7 +15,7 @@ export function SectionHeading({
   ...props
 }: PropsWithChildren<HTMLAttributes<HTMLHeadingElement>>) {
   return (
-    <h2 className={cn("text-xl font-semibold tracking-[-0.02em] text-slate-950", className)} {...props}>
+    <h2 className={cn("text-xl font-semibold text-slate-950", className)} {...props}>
       {children}
     </h2>
   );

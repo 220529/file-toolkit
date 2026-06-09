@@ -2,14 +2,15 @@ use log::info;
 use std::io::{BufRead, BufReader};
 use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use tauri::{AppHandle, Emitter};
 
 use super::ffmpeg_utils::{get_ffmpeg_path, get_ffprobe_path};
+use super::process::{kill_tracked_process, new_process_slot, ProcessSlot, ProcessTracker};
 
 lazy_static::lazy_static! {
     static ref CONVERT_CANCELLED: Arc<AtomicBool> = Arc::new(AtomicBool::new(false));
-    static ref CONVERT_PROCESS: Arc<Mutex<Option<u32>>> = Arc::new(Mutex::new(None));
+    static ref CONVERT_PROCESS: ProcessSlot = new_process_slot();
 }
 
 /// 获取视频时长
@@ -112,35 +113,45 @@ pub async fn convert_video(
             .spawn()
             .map_err(|e| format!("启动 ffmpeg 失败: {}", e))?;
 
-        let pid = child.id();
-        *CONVERT_PROCESS.lock().unwrap() = Some(pid);
+        let _process_tracker = ProcessTracker::register(&CONVERT_PROCESS, child.id());
 
-        let stdout = child.stdout.take().unwrap();
-        let reader = BufReader::new(stdout);
+        let convert_result = (|| -> Result<bool, String> {
+            let stdout = child
+                .stdout
+                .take()
+                .ok_or_else(|| "无法读取 ffmpeg 输出".to_string())?;
+            let reader = BufReader::new(stdout);
 
-        for line in reader.lines().map_while(Result::ok) {
+            for line in reader.lines().map_while(Result::ok) {
+                if cancelled.load(Ordering::SeqCst) {
+                    info!("[转换] 用户取消操作");
+                    let _ = child.kill();
+                    break;
+                }
+
+                if let Some(time_str) = line.strip_prefix("out_time=") {
+                    if let Some(secs) = parse_ffmpeg_time(time_str) {
+                        let progress = (secs / duration * 100.0).clamp(0.0, 100.0);
+                        let _ = app.emit("convert-progress", progress);
+                    }
+                }
+            }
+
+            let status = child
+                .wait()
+                .map_err(|e| format!("等待 ffmpeg 失败: {}", e))?;
+
             if cancelled.load(Ordering::SeqCst) {
-                info!("[转换] 用户取消操作");
-                let _ = child.kill();
+                let _ = std::fs::remove_file(&output_clone);
                 return Err("操作已取消".to_string());
             }
 
-            if let Some(time_str) = line.strip_prefix("out_time=") {
-                if let Some(secs) = parse_ffmpeg_time(time_str) {
-                    let progress = (secs / duration * 100.0).clamp(0.0, 100.0);
-                    let _ = app.emit("convert-progress", progress);
-                }
-            }
-        }
+            let _ = app.emit("convert-progress", 100.0);
 
-        *CONVERT_PROCESS.lock().unwrap() = None;
+            Ok(status.success())
+        })();
 
-        let status = child
-            .wait()
-            .map_err(|e| format!("等待 ffmpeg 失败: {}", e))?;
-        let _ = app.emit("convert-progress", 100.0);
-
-        Ok::<bool, String>(status.success())
+        convert_result
     })
     .await
     .map_err(|e| format!("任务执行失败: {}", e))??;
@@ -160,18 +171,7 @@ pub fn cancel_convert() {
     info!("[转换] 收到取消请求");
     CONVERT_CANCELLED.store(true, Ordering::SeqCst);
 
-    if let Some(pid) = *CONVERT_PROCESS.lock().unwrap() {
-        #[cfg(unix)]
-        {
-            let _ = Command::new("kill").arg(pid.to_string()).status();
-        }
-        #[cfg(windows)]
-        {
-            let _ = Command::new("taskkill")
-                .args(["/PID", &pid.to_string(), "/F"])
-                .status();
-        }
-    }
+    kill_tracked_process(&CONVERT_PROCESS);
 }
 
 fn parse_ffmpeg_time(time_str: &str) -> Option<f64> {

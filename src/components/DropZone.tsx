@@ -4,6 +4,7 @@ import { useWindowDrop } from "../hooks/useWindowDrop";
 import { Badge } from "./ui/badge";
 import { Button } from "./ui/button";
 import { Card, CardContent } from "./ui/card";
+import { Icon } from "./ui/icon";
 import { cn } from "../utils/cn";
 import { getBaseName } from "../utils/path";
 
@@ -40,21 +41,25 @@ export default function DropZone({ onSelect, loading, selectedPath, active = tru
             dragging && active && "dragging"
           )}
         >
-          <div className="mb-3 flex h-14 w-14 items-center justify-center rounded-[20px] bg-white text-[28px] shadow-[0_14px_28px_rgba(15,23,42,0.08)]">
-            {loading ? "⏳" : dragging ? "📂" : "🗂️"}
+          <div className="mb-3 flex h-12 w-12 items-center justify-center rounded-[8px] border border-slate-200 bg-slate-50 text-[var(--brand-700)]">
+            <Icon
+              name={dragging ? "folderOpen" : "folder"}
+              size={26}
+              className={loading ? "animate-pulse" : undefined}
+            />
           </div>
           <div className="text-base font-semibold text-slate-900">
             {loading ? "正在处理，请稍候" : dragging ? "松开以载入文件夹" : "拖入文件夹，或点击选择"}
           </div>
           <div className="mt-4">
-            <Button variant="secondary" size="sm">
+            <Button variant="primary" size="sm">
               {loading ? "处理中…" : "选择文件夹"}
             </Button>
           </div>
         </div>
 
         {selectedPath && (
-          <div className="mt-4 flex flex-wrap items-center gap-3 rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3">
+          <div className="mt-4 flex flex-wrap items-center gap-3 rounded-[8px] border border-slate-200 bg-slate-50 px-4 py-3">
             <Badge tone="info">当前目录</Badge>
             <div className="min-w-0 flex-1">
               <div className="truncate text-sm font-medium text-slate-800">{getBaseName(selectedPath) || selectedPath}</div>

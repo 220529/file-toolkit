@@ -1,5 +1,4 @@
-import { invoke } from "@tauri-apps/api/core";
-import { revealItemInDir } from "@tauri-apps/plugin-opener";
+import { openFilePath, revealFilePath } from "../api/tauri";
 import { useToast } from "../components/Toast";
 
 export function useFileActions() {
@@ -7,7 +6,7 @@ export function useFileActions() {
 
   async function openFile(path: string) {
     try {
-      await invoke("open_file_path", { path });
+      await openFilePath(path);
     } catch (e) {
       toast.error("打开文件失败: " + e);
     }
@@ -15,7 +14,7 @@ export function useFileActions() {
 
   async function revealInDir(path: string) {
     try {
-      await revealItemInDir(path);
+      await revealFilePath(path);
     } catch (e) {
       toast.error("打开所在位置失败: " + e);
     }

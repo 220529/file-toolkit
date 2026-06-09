@@ -1,10 +1,6 @@
 import { useEffect, useEffectEvent, useState } from "react";
 import { safeListen } from "../utils/tauriEvent";
 
-interface DragDropPayload {
-  paths: string[];
-}
-
 interface UseWindowDropOptions {
   active?: boolean;
   onDrop: (paths: string[]) => void | Promise<void>;
@@ -20,13 +16,13 @@ export function useWindowDrop({ active = true, onDrop }: UseWindowDropOptions) {
       return;
     }
 
-    const cleanupEnter = safeListen<DragDropPayload>("tauri://drag-enter", () => {
+    const cleanupEnter = safeListen("tauri://drag-enter", () => {
       setDragging(true);
     });
     const cleanupLeave = safeListen("tauri://drag-leave", () => {
       setDragging(false);
     });
-    const cleanupDrop = safeListen<DragDropPayload>("tauri://drag-drop", (event) => {
+    const cleanupDrop = safeListen("tauri://drag-drop", (event) => {
       setDragging(false);
       const paths = event.payload.paths;
       if (paths && paths.length > 0) {

@@ -1,4 +1,5 @@
 import { createContext, useCallback, useContext, useMemo, useState } from "react";
+import { Icon, type IconName } from "./ui/icon";
 import { cn } from "../utils/cn";
 
 interface ToastItem {
@@ -19,17 +20,17 @@ const ToastContext = createContext<ToastContextType | null>(null);
 let toastId = 0;
 
 const toneClasses = {
-  success: "border-emerald-200 bg-emerald-50 text-emerald-800",
-  error: "border-rose-200 bg-rose-50 text-rose-800",
-  info: "border-blue-200 bg-blue-50 text-blue-800",
-  warning: "border-amber-200 bg-amber-50 text-amber-800",
+  success: "border-emerald-200 bg-white text-emerald-800",
+  error: "border-rose-200 bg-white text-rose-800",
+  info: "border-blue-200 bg-white text-blue-800",
+  warning: "border-amber-200 bg-white text-amber-800",
 };
 
-const icons = {
-  success: "✓",
-  error: "!",
-  info: "i",
-  warning: "•",
+const icons: Record<ToastItem["type"], IconName> = {
+  success: "check",
+  error: "warning",
+  info: "info",
+  warning: "warning",
 };
 
 export function ToastProvider({ children }: { children: React.ReactNode }) {
@@ -56,25 +57,26 @@ export function ToastProvider({ children }: { children: React.ReactNode }) {
   return (
     <ToastContext.Provider value={value}>
       {children}
-      <div className="pointer-events-none fixed right-5 top-5 z-[120] flex w-[min(380px,calc(100vw-32px))] flex-col gap-3">
+      <div className="pointer-events-none fixed right-5 top-5 z-[120] flex w-[min(380px,calc(100vw-32px))] flex-col gap-2.5">
         {toasts.map((toast) => (
           <div
             key={toast.id}
             className={cn(
-              "pointer-events-auto animate-slide-in rounded-2xl border px-4 py-3 shadow-[0_20px_60px_rgba(15,23,42,0.12)] backdrop-blur",
+              "pointer-events-auto animate-slide-in rounded-[10px] border px-4 py-3 shadow-[0_12px_30px_rgba(15,23,42,0.12)]",
               toneClasses[toast.type]
             )}
           >
             <div className="flex items-start gap-3">
-              <div className="mt-0.5 flex h-7 w-7 flex-shrink-0 items-center justify-center rounded-full bg-white/80 text-sm font-semibold shadow-[0_8px_18px_rgba(15,23,42,0.08)]">
-                {icons[toast.type]}
+              <div className="mt-0.5 flex h-7 w-7 flex-shrink-0 items-center justify-center rounded-[8px] bg-slate-50 text-sm font-semibold ring-1 ring-slate-200">
+                <Icon name={icons[toast.type]} size={15} />
               </div>
               <div className="min-w-0 flex-1 text-sm leading-6">{toast.message}</div>
               <button
                 onClick={() => setToasts((current) => current.filter((item) => item.id !== toast.id))}
-                className="text-sm text-slate-400 transition hover:text-slate-700"
+                className="rounded-md px-1 text-sm text-slate-400 transition hover:bg-slate-100 hover:text-slate-700"
+                aria-label="关闭提示"
               >
-                ✕
+                <Icon name="close" size={14} />
               </button>
             </div>
           </div>

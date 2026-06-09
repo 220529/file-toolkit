@@ -130,6 +130,9 @@ pnpm tauri dev
 ## 打包
 
 ```bash
+# 发布前本地检查
+pnpm run verify
+
 # 确保 FFmpeg 已下载到 src-tauri/binaries/
 pnpm tauri build
 ```

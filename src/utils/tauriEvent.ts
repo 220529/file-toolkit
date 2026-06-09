@@ -1,5 +1,31 @@
 import { invoke, transformCallback } from "@tauri-apps/api/core";
 import type { EventCallback, EventName, Options } from "@tauri-apps/api/event";
+import type {
+  BatchTrimProgress,
+  DedupProgress,
+  FileStatsProgress,
+  WatermarkBatchProgress,
+} from "../api/tauri";
+
+export interface DragDropPayload {
+  paths: string[];
+  position?: {
+    x: number;
+    y: number;
+  };
+}
+
+export interface TauriEventMap {
+  "batch-video-progress": BatchTrimProgress;
+  "convert-progress": number;
+  "dedup-progress": DedupProgress;
+  "file-stats-progress": FileStatsProgress;
+  "tauri://drag-drop": DragDropPayload;
+  "tauri://drag-enter": DragDropPayload;
+  "tauri://drag-leave": unknown;
+  "video-progress": number;
+  "watermark-progress": WatermarkBatchProgress;
+}
 
 type TauriWindowInternals = Window & {
   __TAURI_INTERNALS__?: {
@@ -7,6 +33,12 @@ type TauriWindowInternals = Window & {
   };
 };
 
+export function safeListen<K extends keyof TauriEventMap>(
+  event: K,
+  handler: EventCallback<TauriEventMap[K]>,
+  options?: Options
+): () => void;
+export function safeListen<T>(event: EventName, handler: EventCallback<T>, options?: Options): () => void;
 export function safeListen<T>(event: EventName, handler: EventCallback<T>, options?: Options) {
   const target = typeof options?.target === "string"
     ? { kind: "AnyLabel" as const, label: options.target }

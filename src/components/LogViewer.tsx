@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { invoke } from "@tauri-apps/api/core";
+import { getLogPath, getRecentLogs } from "../api/tauri";
 import { useFileActions } from "../hooks/useFileActions";
 import { Badge } from "./ui/badge";
 import { Button } from "./ui/button";
@@ -19,10 +19,7 @@ export default function LogViewer({ onClose }: Props) {
   async function loadLogs() {
     setLoading(true);
     try {
-      const [path, content] = await Promise.all([
-        invoke<string>("get_log_path"),
-        invoke<string>("get_recent_logs", { lines: 200 }),
-      ]);
+      const [path, content] = await Promise.all([getLogPath(), getRecentLogs(200)]);
       setLogPath(path);
       setLogs(content || "暂无日志");
     } catch (e) {
@@ -43,7 +40,7 @@ export default function LogViewer({ onClose }: Props) {
   }, []);
 
   return (
-    <Modal onClose={onClose}>
+    <Modal onClose={onClose} accessibleTitle="日志查看器">
       <div className="flex max-h-[84vh] flex-col">
         <div className="flex items-start justify-between gap-4 border-b border-slate-100 px-6 py-5">
           <div className="min-w-0">

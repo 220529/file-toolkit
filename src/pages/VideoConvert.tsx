@@ -1,15 +1,17 @@
 import { useEffect, useRef, useState } from "react";
-import { invoke } from "@tauri-apps/api/core";
 import { open } from "@tauri-apps/plugin-dialog";
+import { cancelConvert, convertVideo, getFileSize } from "../api/tauri";
 import { useTaskReporter } from "../components/TaskCenter";
 import { useToast } from "../components/Toast";
 import { Badge } from "../components/ui/badge";
 import { Button } from "../components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "../components/ui/card";
+import { Icon } from "../components/ui/icon";
 import { Progress } from "../components/ui/progress";
 import { useFileActions } from "../hooks/useFileActions";
 import { useWindowDrop } from "../hooks/useWindowDrop";
 import { cn } from "../utils/cn";
+import { createId } from "../utils/id";
 import { safeListen } from "../utils/tauriEvent";
 import { getBaseName, getDirName, getExtension, getPathSeparator, joinPath, stripExtension } from "../utils/path";
 
@@ -59,8 +61,8 @@ function SummaryCard({ label, value }: { label: string; value: string }) {
   return (
     <Card>
       <CardContent className="px-5 py-5">
-        <div className="text-xs uppercase tracking-[0.18em] text-slate-400">{label}</div>
-        <div className="mt-3 text-3xl font-semibold tracking-[-0.03em] text-slate-950">{value}</div>
+        <div className="text-xs font-medium text-slate-400">{label}</div>
+        <div className="mt-3 text-3xl font-semibold text-slate-950">{value}</div>
       </CardContent>
     </Card>
   );
@@ -80,7 +82,7 @@ export default function VideoConvert({ active }: Props) {
   useEffect(() => {
     if (!active) return;
 
-    return safeListen<number>("convert-progress", (event) => {
+    return safeListen("convert-progress", (event) => {
       if (currentIndex >= 0) {
         setFiles((prev) =>
           prev.map((file, index) => (index === currentIndex ? { ...file, progress: Math.round(event.payload) } : file))
@@ -106,9 +108,9 @@ export default function VideoConvert({ active }: Props) {
     const newFiles: FileItem[] = [];
     for (const path of newPaths) {
       try {
-        const size = await invoke<number>("get_file_size", { path });
+        const size = await getFileSize(path);
         newFiles.push({
-          id: Math.random().toString(36).slice(2),
+          id: createId("video-convert"),
           path,
           name: getBaseName(path),
           sourceFormat: getExtension(path).toLowerCase(),
@@ -173,7 +175,7 @@ export default function VideoConvert({ active }: Props) {
       );
 
       try {
-        await invoke("convert_video", {
+        await convertVideo({
           input: file.path,
           output: outputPath,
           format: targetFormat,
@@ -182,7 +184,7 @@ export default function VideoConvert({ active }: Props) {
 
         let outputSize = 0;
         try {
-          outputSize = await invoke<number>("get_file_size", { path: outputPath });
+          outputSize = await getFileSize(outputPath);
         } catch {
           // ignore
         }
@@ -230,7 +232,7 @@ export default function VideoConvert({ active }: Props) {
 
   function handleCancel() {
     cancelRequestedRef.current = true;
-    void invoke("cancel_convert");
+    void cancelConvert();
     setConverting(false);
   }
 
@@ -266,8 +268,12 @@ export default function VideoConvert({ active }: Props) {
             onClick={handleSelectFiles}
             className={cn("drop-zone flex flex-col items-center justify-center", dragging && active && "dragging")}
           >
-            <div className="mb-4 flex h-16 w-16 items-center justify-center rounded-[22px] bg-white text-3xl shadow-[0_16px_34px_rgba(15,23,42,0.08)]">
-              {converting ? "⏳" : dragging ? "📂" : "🎬"}
+            <div className="mb-4 flex h-12 w-12 items-center justify-center rounded-[8px] border border-slate-200 bg-slate-50 text-[var(--brand-700)]">
+              <Icon
+                name={dragging ? "folderOpen" : "video"}
+                size={30}
+                className={converting ? "animate-pulse" : undefined}
+              />
             </div>
             <div className="text-lg font-semibold text-slate-900">
               {converting ? "转换任务进行中" : dragging ? "松开以添加视频文件" : "拖入视频，或点击选择"}
@@ -279,7 +285,7 @@ export default function VideoConvert({ active }: Props) {
             </div>
           </div>
           {files.length > 0 && (
-            <div className="mt-4 flex flex-wrap items-center gap-3 rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3">
+            <div className="mt-4 flex flex-wrap items-center gap-3 rounded-[10px] border border-slate-200 bg-slate-50 px-4 py-3">
               <Badge tone="info">任务队列</Badge>
               <div className="text-sm text-slate-600">已选择 {files.length} 个文件</div>
               {doneCount > 0 && <Badge tone="success">完成 {doneCount}</Badge>}
@@ -314,7 +320,7 @@ export default function VideoConvert({ active }: Props) {
                   <div
                     key={file.id}
                     className={cn(
-                      "rounded-2xl border px-4 py-4",
+                      "rounded-[10px] border px-4 py-4",
                       file.status === "done" && "border-emerald-100 bg-emerald-50/70",
                       file.status === "converting" && "border-blue-100 bg-blue-50/80",
                       file.status === "error" && "border-rose-100 bg-rose-50/70",
@@ -322,7 +328,7 @@ export default function VideoConvert({ active }: Props) {
                     )}
                   >
                     <div className="flex items-start gap-4">
-                      <div className="flex h-9 w-9 flex-shrink-0 items-center justify-center rounded-2xl bg-white text-sm font-medium shadow-[0_10px_20px_rgba(15,23,42,0.06)]">
+                      <div className="flex h-9 w-9 flex-shrink-0 items-center justify-center rounded-[8px] border border-slate-200 bg-white text-sm font-medium">
                         {index + 1}
                       </div>
                       <div className="min-w-0 flex-1">
@@ -386,7 +392,7 @@ export default function VideoConvert({ active }: Props) {
                         onClick={() => !converting && setTargetFormat(item.value)}
                         disabled={converting}
                         className={cn(
-                          "flex w-full items-center justify-between rounded-2xl border px-4 py-3 text-left transition",
+                          "flex w-full items-center justify-between rounded-[10px] border px-4 py-3 text-left transition",
                           targetFormat === item.value
                             ? "border-[var(--brand-300)] bg-[var(--brand-50)]"
                             : "border-slate-200 bg-white hover:border-slate-300"
@@ -411,7 +417,7 @@ export default function VideoConvert({ active }: Props) {
                         onClick={() => !converting && setQuality(item.value)}
                         disabled={converting}
                         className={cn(
-                          "flex w-full items-center justify-between rounded-2xl border px-4 py-3 text-left transition",
+                          "flex w-full items-center justify-between rounded-[10px] border px-4 py-3 text-left transition",
                           quality === item.value
                             ? "border-[var(--brand-300)] bg-[var(--brand-50)]"
                             : "border-slate-200 bg-white hover:border-slate-300"

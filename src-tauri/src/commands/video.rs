@@ -12,11 +12,13 @@ use walkdir::WalkDir;
 
 use super::ffmpeg_utils::{get_ffmpeg_path, get_ffprobe_path};
 use super::logger::{log_error, log_info};
+use super::process::{kill_tracked_process, new_process_slot, ProcessSlot, ProcessTracker};
 
 // 全局变量存储当前 FFmpeg 进程，用于取消
 lazy_static::lazy_static! {
     static ref VIDEO_CANCELLED: Arc<AtomicBool> = Arc::new(AtomicBool::new(false));
-    static ref FFMPEG_PROCESS: Arc<Mutex<Option<u32>>> = Arc::new(Mutex::new(None));
+    static ref VIDEO_FFMPEG_PROCESS: ProcessSlot = new_process_slot();
+    static ref BATCH_VIDEO_FFMPEG_PROCESS: ProcessSlot = new_process_slot();
     static ref BATCH_VIDEO_CANCELLED: Mutex<HashMap<String, Arc<AtomicBool>>> = Mutex::new(HashMap::new());
 }
 
@@ -126,6 +128,12 @@ fn progress_percent(current: f64, duration: f64) -> f64 {
     }
 
     (current / duration * 100.0).clamp(0.0, 100.0)
+}
+
+fn cancellation_requested(cancelled: Option<&AtomicBool>) -> bool {
+    cancelled
+        .map(|flag| flag.load(Ordering::SeqCst))
+        .unwrap_or(false)
 }
 
 fn generate_preview_frame_with_options(
@@ -473,9 +481,14 @@ fn run_fast_cut(
     output: &str,
     start_time: f64,
     end_time: f64,
+    process_slot: Option<&ProcessSlot>,
+    cancelled: Option<&AtomicBool>,
 ) -> Result<(), String> {
     if end_time <= start_time {
         return Err("结束时间必须大于开始时间".into());
+    }
+    if cancellation_requested(cancelled) {
+        return Err("操作已取消".into());
     }
 
     let ffmpeg = get_ffmpeg_path(app);
@@ -509,16 +522,27 @@ fn run_fast_cut(
 
     args.push(output.to_string());
 
-    let result = Command::new(&ffmpeg)
+    let child = Command::new(&ffmpeg)
         .args(&args)
         .stdout(Stdio::null())
         .stderr(Stdio::piped())
-        .output()
-        .map_err(|error| format!("执行 ffmpeg 失败: {}", error))?;
+        .spawn()
+        .map_err(|error| format!("启动 ffmpeg 失败: {}", error))?;
+
+    let _process_tracker = process_slot.map(|slot| ProcessTracker::register(slot, child.id()));
+    let result = child
+        .wait_with_output()
+        .map_err(|error| format!("等待 ffmpeg 失败: {}", error))?;
+
+    if cancellation_requested(cancelled) {
+        let _ = std::fs::remove_file(output);
+        return Err("操作已取消".into());
+    }
 
     if result.status.success() {
         Ok(())
     } else {
+        let _ = std::fs::remove_file(output);
         let stderr = String::from_utf8_lossy(&result.stderr).trim().to_string();
         if stderr.is_empty() {
             Err("视频截取失败".into())
@@ -528,18 +552,30 @@ fn run_fast_cut(
     }
 }
 
-fn run_precise_cut<F>(
-    app: &AppHandle,
-    input: &str,
-    output: &str,
+struct PreciseCutRequest<'a> {
+    input: &'a str,
+    output: &'a str,
     start_time: f64,
     end_time: f64,
+}
+
+fn run_precise_cut<F>(
+    app: &AppHandle,
+    request: PreciseCutRequest<'_>,
+    process_slot: &ProcessSlot,
     cancelled: &AtomicBool,
     mut on_progress: F,
 ) -> Result<(), String>
 where
     F: FnMut(f64),
 {
+    let PreciseCutRequest {
+        input,
+        output,
+        start_time,
+        end_time,
+    } = request;
+
     if end_time <= start_time {
         return Err("结束时间必须大于开始时间".into());
     }
@@ -596,8 +632,7 @@ where
         .spawn()
         .map_err(|error| format!("启动 ffmpeg 失败: {}", error))?;
 
-    let pid = child.id();
-    *FFMPEG_PROCESS.lock().unwrap() = Some(pid);
+    let _process_tracker = ProcessTracker::register(process_slot, child.id());
 
     let cut_result = (|| -> Result<(), String> {
         let stdout = child
@@ -647,7 +682,6 @@ where
         Ok(())
     })();
 
-    *FFMPEG_PROCESS.lock().unwrap() = None;
     cut_result
 }
 
@@ -844,10 +878,13 @@ pub async fn batch_trim_videos(
             let result = if precise_mode {
                 run_precise_cut(
                     &app,
-                    input_path,
-                    &output_string,
-                    trim_start,
-                    duration,
+                    PreciseCutRequest {
+                        input: input_path,
+                        output: &output_string,
+                        start_time: trim_start,
+                        end_time: duration,
+                    },
+                    &BATCH_VIDEO_FFMPEG_PROCESS,
                     &cancelled,
                     |item_progress| {
                         emit_batch_progress(
@@ -865,7 +902,15 @@ pub async fn batch_trim_videos(
                     },
                 )
             } else {
-                run_fast_cut(&app, input_path, &output_string, trim_start, duration)
+                run_fast_cut(
+                    &app,
+                    input_path,
+                    &output_string,
+                    trim_start,
+                    duration,
+                    Some(&BATCH_VIDEO_FFMPEG_PROCESS),
+                    Some(&cancelled),
+                )
             };
 
             match result {
@@ -947,59 +992,26 @@ pub fn cut_video(
         return Err("结束时间必须大于开始时间".into());
     }
 
-    let ffmpeg = get_ffmpeg_path(&app);
+    VIDEO_CANCELLED.store(false, Ordering::SeqCst);
+
     let duration = end_time - start_time;
-    let use_faststart = output_needs_faststart(&output);
     info!(
         "[截取] 快速模式: {} -> {}, {:.2}s - {:.2}s (时长 {:.2}s)",
         input, output, start_time, end_time, duration
     );
 
-    let mut args = vec![
-        "-y".to_string(),
-        "-ss".to_string(),
-        format!("{}", start_time),
-        "-i".to_string(),
-        input.clone(),
-        "-t".to_string(),
-        format!("{}", duration),
-        "-map".to_string(),
-        "0:v:0".to_string(),
-        "-map".to_string(),
-        "0:a?".to_string(),
-        "-map_metadata".to_string(),
-        "0".to_string(),
-        "-c".to_string(),
-        "copy".to_string(),
-        "-avoid_negative_ts".to_string(),
-        "make_zero".to_string(),
-    ];
+    run_fast_cut(
+        &app,
+        &input,
+        &output,
+        start_time,
+        end_time,
+        Some(&VIDEO_FFMPEG_PROCESS),
+        Some(&VIDEO_CANCELLED),
+    )?;
 
-    if use_faststart {
-        args.push("-movflags".to_string());
-        args.push("+faststart".to_string());
-    }
-
-    args.push(output.clone());
-
-    let result = Command::new(&ffmpeg)
-        .args(&args)
-        .stdout(Stdio::null())
-        .stderr(Stdio::piped())
-        .output()
-        .map_err(|e| format!("执行 ffmpeg 失败: {}", e))?;
-
-    if result.status.success() {
-        info!("[截取] 快速模式完成: {}", output);
-        Ok(output)
-    } else {
-        let stderr = String::from_utf8_lossy(&result.stderr).trim().to_string();
-        if stderr.is_empty() {
-            Err("视频截取失败".into())
-        } else {
-            Err(format!("视频截取失败: {}", stderr))
-        }
-    }
+    info!("[截取] 快速模式完成: {}", output);
+    Ok(output)
 }
 
 /// 精确截取视频（重新编码，带进度反馈）
@@ -1078,8 +1090,7 @@ pub async fn cut_video_precise(
             .spawn()
             .map_err(|e| format!("启动 ffmpeg 失败: {}", e))?;
 
-        let pid = child.id();
-        *FFMPEG_PROCESS.lock().unwrap() = Some(pid);
+        let _process_tracker = ProcessTracker::register(&VIDEO_FFMPEG_PROCESS, child.id());
 
         let cut_result = (|| -> Result<bool, String> {
             let stdout = child
@@ -1133,7 +1144,6 @@ pub async fn cut_video_precise(
             Ok(true)
         })();
 
-        *FFMPEG_PROCESS.lock().unwrap() = None;
         cut_result
     })
     .await
@@ -1154,18 +1164,7 @@ pub fn cancel_video_cut() {
     info!("[截取] 收到取消请求");
     VIDEO_CANCELLED.store(true, Ordering::SeqCst);
 
-    if let Some(pid) = *FFMPEG_PROCESS.lock().unwrap() {
-        #[cfg(unix)]
-        {
-            let _ = Command::new("kill").arg(pid.to_string()).status();
-        }
-        #[cfg(windows)]
-        {
-            let _ = Command::new("taskkill")
-                .args(["/PID", &pid.to_string(), "/F"])
-                .status();
-        }
-    }
+    kill_tracked_process(&VIDEO_FFMPEG_PROCESS);
 }
 
 #[tauri::command]
@@ -1173,18 +1172,7 @@ pub fn cancel_batch_video_trim(task_id: String) {
     info!("[批量去头] 收到取消请求: {}", task_id);
     mark_batch_task_cancelled(&task_id);
 
-    if let Some(pid) = *FFMPEG_PROCESS.lock().unwrap() {
-        #[cfg(unix)]
-        {
-            let _ = Command::new("kill").arg(pid.to_string()).status();
-        }
-        #[cfg(windows)]
-        {
-            let _ = Command::new("taskkill")
-                .args(["/PID", &pid.to_string(), "/F"])
-                .status();
-        }
-    }
+    kill_tracked_process(&BATCH_VIDEO_FFMPEG_PROCESS);
 }
 
 fn parse_ffmpeg_time(time_str: &str) -> Option<f64> {

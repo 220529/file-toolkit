@@ -1,52 +1,26 @@
 import { useEffect, useRef, useState } from "react";
-import { invoke } from "@tauri-apps/api/core";
 import { flushSync } from "react-dom";
+import {
+  cancelFileStats,
+  scanDirectory,
+  type FileStatsEntry,
+  type FileStatsProgress,
+  type ScanResult,
+} from "../api/tauri";
 import DropZone from "../components/DropZone";
 import { useTaskReporter } from "../components/TaskCenter";
 import { EmptyState } from "../components/ui/empty-state";
 import { Badge } from "../components/ui/badge";
 import { Button } from "../components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "../components/ui/card";
+import { Icon } from "../components/ui/icon";
 import { Input } from "../components/ui/input";
 import { Progress } from "../components/ui/progress";
 import { useToast } from "../components/Toast";
 import { useFileActions } from "../hooks/useFileActions";
+import { createTaskId } from "../utils/id";
 import { safeListen } from "../utils/tauriEvent";
 import { formatSize } from "../utils/format";
-
-interface FileStats {
-  extension: string;
-  count: number;
-  total_size: number;
-}
-
-interface ScanIssue {
-  path: string;
-  reason: string;
-}
-
-interface ScanResult {
-  stats: FileStats[];
-  total_files: number;
-  folder_count: number;
-  total_size: number;
-  type_count: number;
-  skipped_files: number;
-  permission_denied_files: number;
-  sample_errors: ScanIssue[];
-}
-
-interface FileStatsProgress {
-  task_id: string;
-  stage: string;
-  current: number;
-  total: number;
-  percent: number;
-  elapsed_ms: number;
-  files_per_second: number;
-  skipped_files: number;
-  permission_denied_files: number;
-}
 
 type SortMode = "size" | "count";
 const DEFAULT_VISIBLE_ROWS = 20;
@@ -98,7 +72,7 @@ export default function FileStats({ active = true }: { active?: boolean }) {
   useEffect(() => {
     if (!active) return;
 
-    return safeListen<FileStatsProgress>("file-stats-progress", (event) => {
+    return safeListen("file-stats-progress", (event) => {
       if (event.payload.task_id !== currentTaskIdRef.current) return;
       setProgress((prev) => {
         if (
@@ -116,7 +90,7 @@ export default function FileStats({ active = true }: { active?: boolean }) {
 
   async function handleSelect(path: string) {
     if (loading) return;
-    const taskId = `${Date.now()}-${Math.random().toString(36).slice(2)}`;
+    const taskId = createTaskId("file-stats");
     const isSamePath = path === selectedPath;
     currentTaskIdRef.current = taskId;
 
@@ -146,7 +120,7 @@ export default function FileStats({ active = true }: { active?: boolean }) {
     });
 
     try {
-      const res = await invoke<ScanResult>("scan_directory", { path, taskId });
+      const res = await scanDirectory(path, taskId);
       if (currentTaskIdRef.current !== taskId) return;
       setResult(res);
     } catch (e) {
@@ -167,7 +141,7 @@ export default function FileStats({ active = true }: { active?: boolean }) {
     if (!taskId) return;
 
     try {
-      await invoke("cancel_file_stats", { taskId });
+      await cancelFileStats(taskId);
       currentTaskIdRef.current = null;
       setLoading(false);
       setProgress(null);
@@ -211,7 +185,7 @@ export default function FileStats({ active = true }: { active?: boolean }) {
   const isRefreshingCurrentResult = loading && !!result;
   const topBySize = result?.stats[0] ?? null;
   const topByCount = result
-    ? result.stats.reduce<FileStats | null>((current, item) => {
+    ? result.stats.reduce<FileStatsEntry | null>((current, item) => {
         if (!current) return item;
         if (item.count > current.count) return item;
         if (item.count === current.count && item.total_size > current.total_size) return item;
@@ -271,11 +245,11 @@ export default function FileStats({ active = true }: { active?: boolean }) {
 
       {result && (
         <>
-          <Card className="bg-[linear-gradient(135deg,rgba(255,255,255,0.96),rgba(245,248,255,0.92))]">
+          <Card>
             <CardContent className="px-5 py-4">
               <div className="overflow-x-auto">
                 <div className="flex min-w-max items-center gap-3 whitespace-nowrap text-sm text-slate-600">
-                  <span className="text-xs font-medium uppercase tracking-[0.18em] text-slate-400">概览</span>
+                  <span className="text-xs font-medium text-slate-400">概览</span>
                   <span>
                     文件 <span className="font-semibold text-slate-900">{result.total_files.toLocaleString()}</span>
                   </span>
@@ -301,7 +275,7 @@ export default function FileStats({ active = true }: { active?: boolean }) {
           </Card>
 
           {topBySize && topByCount && (
-            <Card className="bg-[linear-gradient(135deg,rgba(255,255,255,0.96),rgba(245,248,255,0.92))]">
+            <Card>
               <CardContent className="flex flex-col gap-2 px-5 py-4 md:flex-row md:items-center md:justify-between">
                 <div
                   className="min-w-0 truncate text-sm text-slate-600"
@@ -325,7 +299,7 @@ export default function FileStats({ active = true }: { active?: boolean }) {
           )}
 
           {result.skipped_files > 0 && (
-            <Card className="border-amber-100 bg-gradient-to-br from-amber-50/80 to-white">
+            <Card className="border-amber-200 bg-amber-50">
               <CardContent className="space-y-4 px-5 py-5">
                 <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
                   <div className="min-w-0">
@@ -347,7 +321,7 @@ export default function FileStats({ active = true }: { active?: boolean }) {
                 </div>
 
                 {result.sample_errors.length > 0 && (
-                  <div className="space-y-2 rounded-[18px] bg-white/80 px-4 py-4 ring-1 ring-amber-100">
+                  <div className="space-y-2 rounded-[10px] bg-white/80 px-4 py-4 ring-1 ring-amber-100">
                     {result.sample_errors.map((item) => (
                       <div key={`${item.path}-${item.reason}`} className="text-sm text-slate-700">
                         <div className="font-medium text-slate-900">{item.path}</div>
@@ -362,7 +336,7 @@ export default function FileStats({ active = true }: { active?: boolean }) {
 
           {result.stats.length === 0 ? (
             <EmptyState
-              icon="🗂"
+              icon={<Icon name="folder" size={28} />}
               title="没有可展示的文件类型"
               description={
                 result.skipped_files > 0
@@ -453,7 +427,7 @@ export default function FileStats({ active = true }: { active?: boolean }) {
                               <Progress
                                 value={result.total_size > 0 ? (item.total_size / result.total_size) * 100 : 0}
                                 className="h-1.5 bg-slate-200/90"
-                                barClassName="bg-[linear-gradient(90deg,#2563eb,#3b82f6)]"
+                                barClassName="bg-[var(--brand-500)]"
                               />
                             </div>
                           </td>
