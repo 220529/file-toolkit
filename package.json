@@ -11,6 +11,7 @@
     "dev": "tauri dev",
     "build": "tsc && vite build",
     "preview": "vite preview",
+    "test": "vitest run",
     "tauri": "tauri",
     "verify": "bash scripts/verify.sh"
   },
@@ -35,6 +36,7 @@
     "@vitejs/plugin-react": "^4.6.0",
     "tailwindcss": "^4.1.18",
     "typescript": "~5.8.3",
-    "vite": "^7.0.4"
+    "vite": "^7.0.4",
+    "vitest": "^3.2.4"
   }
 }

@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { lazy, Suspense, useEffect, useState } from "react";
 import { getVersion } from "@tauri-apps/api/app";
 import { Badge } from "./components/ui/badge";
 import { Button } from "./components/ui/button";
@@ -15,15 +15,16 @@ import { Tooltip, TooltipProvider } from "./components/ui/tooltip";
 import { TaskCenterProvider, TaskStatusBar } from "./components/TaskCenter";
 import { ToastProvider } from "./components/Toast";
 import LogViewer from "./components/LogViewer";
-import Dedup from "./pages/Dedup";
-import BatchVideoTrim from "./pages/BatchVideoTrim";
-import FileStats from "./pages/FileStats";
-import TextToImage from "./pages/TextToImage";
-import VideoConvert from "./pages/VideoConvert";
-import VideoCut from "./pages/VideoCut";
-import Watermark from "./pages/Watermark";
 import { cn } from "./utils/cn";
 import "./index.css";
+
+const FileStats = lazy(() => import("./pages/FileStats"));
+const Dedup = lazy(() => import("./pages/Dedup"));
+const VideoCut = lazy(() => import("./pages/VideoCut"));
+const BatchVideoTrim = lazy(() => import("./pages/BatchVideoTrim"));
+const VideoConvert = lazy(() => import("./pages/VideoConvert"));
+const TextToImage = lazy(() => import("./pages/TextToImage"));
+const Watermark = lazy(() => import("./pages/Watermark"));
 
 type Tab = "stats" | "dedup" | "video-cut" | "batch-video-trim" | "video-convert" | "text-to-image" | "watermark";
 
@@ -37,8 +38,38 @@ const tabMeta: Record<Tab, { label: string; icon: IconName; section: string }> =
   watermark: { label: "水印处理", icon: "magic", section: "图像" },
 };
 
+function PageFallback() {
+  return (
+    <div className="flex min-h-[280px] items-center justify-center text-sm text-slate-500">
+      <div className="flex items-center gap-2">
+        <Icon name="reset" size={16} className="animate-spin" />
+        加载中
+      </div>
+    </div>
+  );
+}
+
+function PageSlot({
+  active,
+  visited,
+  children,
+}: {
+  active: boolean;
+  visited: boolean;
+  children: React.ReactNode;
+}) {
+  const shouldRender = active || visited;
+
+  return (
+    <div className={active ? "" : "hidden"}>
+      {shouldRender && <Suspense fallback={<PageFallback />}>{children}</Suspense>}
+    </div>
+  );
+}
+
 function App() {
   const [activeTab, setActiveTab] = useState<Tab>("stats");
+  const [visitedTabs, setVisitedTabs] = useState<Set<Tab>>(() => new Set(["stats"]));
   const [collapsed, setCollapsed] = useState(false);
   const [showToolsMenu, setShowToolsMenu] = useState(false);
   const [showAbout, setShowAbout] = useState(false);
@@ -50,6 +81,17 @@ function App() {
   useEffect(() => {
     getVersion().then(setVersion).catch(() => {});
   }, []);
+
+  useEffect(() => {
+    setVisitedTabs((current) => {
+      if (current.has(activeTab)) {
+        return current;
+      }
+      const next = new Set(current);
+      next.add(activeTab);
+      return next;
+    });
+  }, [activeTab]);
 
   function handleReset() {
     setResetKey((current) => current + 1);
@@ -216,27 +258,27 @@ function App() {
               </div>
               <TaskStatusBar />
               <div className="flex-1 overflow-auto bg-[var(--panel)] px-3 py-3" data-main-scroll="true">
-                <div className={activeTab === "stats" ? "" : "hidden"}>
+                <PageSlot active={activeTab === "stats"} visited={visitedTabs.has("stats")}>
                   <FileStats key={`stats-${resetKey}`} active={activeTab === "stats"} />
-                </div>
-                <div className={activeTab === "dedup" ? "" : "hidden"}>
+                </PageSlot>
+                <PageSlot active={activeTab === "dedup"} visited={visitedTabs.has("dedup")}>
                   <Dedup key={`dedup-${resetKey}`} active={activeTab === "dedup"} />
-                </div>
-                <div className={activeTab === "video-cut" ? "" : "hidden"}>
+                </PageSlot>
+                <PageSlot active={activeTab === "video-cut"} visited={visitedTabs.has("video-cut")}>
                   <VideoCut key={`video-${resetKey}`} active={activeTab === "video-cut"} />
-                </div>
-                <div className={activeTab === "batch-video-trim" ? "" : "hidden"}>
+                </PageSlot>
+                <PageSlot active={activeTab === "batch-video-trim"} visited={visitedTabs.has("batch-video-trim")}>
                   <BatchVideoTrim key={`batch-video-${resetKey}`} active={activeTab === "batch-video-trim"} />
-                </div>
-                <div className={activeTab === "video-convert" ? "" : "hidden"}>
+                </PageSlot>
+                <PageSlot active={activeTab === "video-convert"} visited={visitedTabs.has("video-convert")}>
                   <VideoConvert key={`convert-${resetKey}`} active={activeTab === "video-convert"} />
-                </div>
-                <div className={activeTab === "text-to-image" ? "" : "hidden"}>
+                </PageSlot>
+                <PageSlot active={activeTab === "text-to-image"} visited={visitedTabs.has("text-to-image")}>
                   <TextToImage key={`text-to-image-${resetKey}`} active={activeTab === "text-to-image"} />
-                </div>
-                <div className={activeTab === "watermark" ? "" : "hidden"}>
+                </PageSlot>
+                <PageSlot active={activeTab === "watermark"} visited={visitedTabs.has("watermark")}>
                   <Watermark key={`watermark-${resetKey}`} active={activeTab === "watermark"} />
-                </div>
+                </PageSlot>
               </div>
             </main>
           </div>

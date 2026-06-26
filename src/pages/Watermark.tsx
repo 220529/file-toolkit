@@ -6,7 +6,6 @@ import {
   cancelWatermarkTask,
   getImageInfo,
   removeWatermark,
-  type BrushStroke,
   type ImageInfo,
   type WatermarkBatchProgress,
   type WatermarkResult as Result,
@@ -16,7 +15,6 @@ import { useToast } from "../components/Toast";
 import { Badge } from "../components/ui/badge";
 import { Button } from "../components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "../components/ui/card";
-import { Icon } from "../components/ui/icon";
 import { Input } from "../components/ui/input";
 import { Slider } from "../components/ui/slider";
 import { Switch } from "../components/ui/switch";
@@ -26,202 +24,44 @@ import { cn } from "../utils/cn";
 import { createTaskId } from "../utils/id";
 import { getBaseName, getExtension } from "../utils/path";
 import { safeListen } from "../utils/tauriEvent";
-
-interface RectSelection {
-  x: number;
-  y: number;
-  w: number;
-  h: number;
-}
-
-interface CanvasPoint {
-  mx: number;
-  my: number;
-  ox: number;
-  oy: number;
-}
-
-interface ComparePoint {
-  x: number;
-  y: number;
-  ox: number;
-  oy: number;
-}
+import { drawBrushMaskPreview, drawImageMagnifier } from "./watermark/canvasUtils";
+import {
+  COMPARE_MAGNIFIER_SAMPLE_SIZE,
+  COMPARE_MAGNIFIER_SIZE,
+  MAGNIFIER_SAMPLE_SIZE,
+  MAGNIFIER_SIZE,
+  MAX_BRUSH_SIZE,
+  MIN_BRUSH_SIZE,
+} from "./watermark/constants";
+import type {
+  CanvasPoint,
+  ComparePoint,
+  DragMode,
+  EditorMode,
+  LoadImageOptions,
+  RectSelection,
+  RemoveMode,
+  RepairMaskBase,
+  RepairTool,
+} from "./watermark/types";
+import {
+  clamp,
+  clampRectToImage,
+  getBatchProgressText,
+  getCornerWatermarkRect,
+  getDefaultRect,
+  getPreviewImageSrc,
+} from "./watermark/utils";
+import { getWatermarkViewState } from "./watermark/viewState";
+import { buildWatermarkSmartTips } from "./watermark/smartTips";
+import { WatermarkDropCard } from "./watermark/WatermarkDropCard";
+import { WatermarkResultActions } from "./watermark/WatermarkResultActions";
+import { WatermarkResultCompare } from "./watermark/WatermarkResultCompare";
+import { WatermarkSmartTips } from "./watermark/WatermarkSmartTips";
+import { useBrushMask } from "./watermark/useBrushMask";
 
 interface Props {
   active: boolean;
-}
-
-interface LoadImageOptions {
-  preserveEditContext?: boolean;
-}
-
-interface SmartTip {
-  tone: "info" | "warning" | "success";
-  title: string;
-  description: string;
-  primaryAction?: {
-    label: string;
-    onClick: () => void;
-  };
-  secondaryAction?: {
-    label: string;
-    onClick: () => void;
-  };
-}
-
-type DragMode = "none" | "move" | "create" | "nw" | "ne" | "sw" | "se" | "n" | "s" | "e" | "w";
-type RemoveMode = "blur" | "fill" | "repair";
-type RepairTool = "rect" | "brush" | "erase";
-type RepairMaskBase = "rect" | "blank";
-type EditorMode = "simple" | "advanced";
-
-const MIN_RECT_SIZE = 8;
-const MIN_BRUSH_SIZE = 8;
-const MAX_BRUSH_SIZE = 120;
-const MAGNIFIER_SIZE = 176;
-const MAGNIFIER_SAMPLE_SIZE = 40;
-const COMPARE_MAGNIFIER_SIZE = 168;
-const COMPARE_MAGNIFIER_SAMPLE_SIZE = 36;
-const SIMPLE_REPAIR_MAX_AREA_RATIO = 0.08;
-
-function clamp(value: number, min: number, max: number) {
-  return Math.max(min, Math.min(max, value));
-}
-
-function clampRectToImage(nextRect: RectSelection, image: ImageInfo) {
-  const minWidth = Math.min(MIN_RECT_SIZE, image.width);
-  const minHeight = Math.min(MIN_RECT_SIZE, image.height);
-  const width = clamp(Math.round(nextRect.w), minWidth, image.width);
-  const height = clamp(Math.round(nextRect.h), minHeight, image.height);
-  const x = clamp(Math.round(nextRect.x), 0, Math.max(0, image.width - width));
-  const y = clamp(Math.round(nextRect.y), 0, Math.max(0, image.height - height));
-
-  return { x, y, w: width, h: height };
-}
-
-function getCornerWatermarkRect(image: ImageInfo) {
-  const width = Math.min(Math.max(Math.round(image.width * 0.22), 180), image.width);
-  const height = Math.min(Math.max(Math.round(image.height * 0.055), 56), image.height);
-  const rightInset = Math.round(image.width * 0.025);
-  const bottomInset = Math.round(image.height * 0.035);
-
-  return clampRectToImage(
-    {
-      x: image.width - width - rightInset,
-      y: image.height - height - bottomInset,
-      w: width,
-      h: height,
-    },
-    image
-  );
-}
-
-function getDefaultRect(image: ImageInfo) {
-  return getCornerWatermarkRect(image);
-}
-
-function splitBrushGestures(strokes: BrushStroke[]) {
-  const gestures: BrushStroke[][] = [];
-  let currentGesture: BrushStroke[] = [];
-
-  strokes.forEach((stroke) => {
-    if (stroke.start || currentGesture.length === 0) {
-      if (currentGesture.length > 0) {
-        gestures.push(currentGesture);
-      }
-      currentGesture = [stroke];
-      return;
-    }
-
-    currentGesture.push(stroke);
-  });
-
-  if (currentGesture.length > 0) {
-    gestures.push(currentGesture);
-  }
-
-  return gestures;
-}
-
-function flattenBrushGestures(gestures: BrushStroke[][]) {
-  return gestures.reduce<BrushStroke[]>((all, gesture) => all.concat(gesture), []);
-}
-
-function getPreviewImageSrc(image: ImageInfo) {
-  return image.thumbnail || convertFileSrc(image.path);
-}
-
-function getBrushDiameter(stroke: BrushStroke, fallbackSize: number) {
-  return Math.max(1, stroke.size || fallbackSize);
-}
-
-function getBatchProgressText(progress: WatermarkBatchProgress | null, fallbackDetail: string) {
-  if (!progress) return fallbackDetail;
-  const segments = [`已完成 ${progress.current} / ${progress.total || 0}`, `${progress.succeeded} 成功`];
-  if (progress.failed > 0) segments.push(`${progress.failed} 失败`);
-  if (progress.current_file) segments.push(progress.current_file);
-  return segments.join(" · ");
-}
-
-function paintBrushMaskCircle(
-  ctx: CanvasRenderingContext2D,
-  x: number,
-  y: number,
-  diameter: number,
-  erase: boolean,
-  scale: number
-) {
-  ctx.save();
-  ctx.globalCompositeOperation = erase ? "destination-out" : "source-over";
-  ctx.fillStyle = "rgba(43, 104, 241, 0.9)";
-  ctx.beginPath();
-  ctx.arc(x * scale, y * scale, (diameter * scale) / 2, 0, Math.PI * 2);
-  ctx.fill();
-  ctx.restore();
-}
-
-function drawBrushMaskPreview(
-  ctx: CanvasRenderingContext2D,
-  strokes: BrushStroke[],
-  scale: number,
-  fallbackSize: number
-) {
-  let previousStroke: BrushStroke | null = null;
-
-  strokes.forEach((stroke) => {
-    const shouldConnect = previousStroke && !stroke.start && previousStroke.erase === stroke.erase;
-
-    if (previousStroke && shouldConnect) {
-      const diameter = Math.max(getBrushDiameter(previousStroke, fallbackSize), getBrushDiameter(stroke, fallbackSize));
-      const dx = stroke.x - previousStroke.x;
-      const dy = stroke.y - previousStroke.y;
-      const distance = Math.hypot(dx, dy);
-
-      if (distance <= Number.EPSILON) {
-        paintBrushMaskCircle(ctx, stroke.x, stroke.y, diameter, stroke.erase, scale);
-      } else {
-        const step = Math.max(diameter / 4, 1);
-        const steps = Math.max(1, Math.ceil(distance / step));
-
-        for (let index = 0; index <= steps; index += 1) {
-          const progress = index / steps;
-          paintBrushMaskCircle(
-            ctx,
-            previousStroke.x + dx * progress,
-            previousStroke.y + dy * progress,
-            diameter,
-            stroke.erase,
-            scale
-          );
-        }
-      }
-    } else {
-      paintBrushMaskCircle(ctx, stroke.x, stroke.y, getBrushDiameter(stroke, fallbackSize), stroke.erase, scale);
-    }
-
-    previousStroke = stroke;
-  });
 }
 
 export default function Watermark({ active }: Props) {
@@ -243,9 +83,6 @@ export default function Watermark({ active }: Props) {
   const [scale, setScale] = useState(1);
   const [repairTool, setRepairTool] = useState<RepairTool>("rect");
   const [repairMaskBase, setRepairMaskBase] = useState<RepairMaskBase>("rect");
-  const [brushSize, setBrushSize] = useState(30);
-  const [brushStrokes, setBrushStrokes] = useState<BrushStroke[]>([]);
-  const [redoBrushGestures, setRedoBrushGestures] = useState<BrushStroke[][]>([]);
   const [painting, setPainting] = useState(false);
   const [hoverPoint, setHoverPoint] = useState<CanvasPoint | null>(null);
   const [compareHoverPoint, setCompareHoverPoint] = useState<ComparePoint | null>(null);
@@ -270,11 +107,19 @@ export default function Watermark({ active }: Props) {
   const simpleMode = editorMode === "simple";
   const activeRepairTool: RepairTool = simpleMode ? "rect" : repairTool;
   const activeRepairMaskBase: RepairMaskBase = simpleMode ? "rect" : repairMaskBase;
-  const activeBrushStrokes = simpleMode ? [] : brushStrokes;
-  const rawBrushGestureCount = splitBrushGestures(brushStrokes).length;
-  const hasMaskEdits = !simpleMode && brushStrokes.length > 0;
-  const brushGestureCount = simpleMode ? 0 : rawBrushGestureCount;
-  const canRedoBrushStroke = !simpleMode && redoBrushGestures.length > 0;
+  const {
+    brushSize,
+    setBrushSize,
+    activeBrushStrokes,
+    hasMaskEdits,
+    brushGestureCount,
+    canRedoBrushStroke,
+    addBrushStroke,
+    handleUndoBrushStroke,
+    handleRedoBrushStroke,
+    clearBrushStrokes,
+    clearBrushMask,
+  } = useBrushMask({ active, simpleMode, removeMode, processing });
   const { dragging } = useWindowDrop({
     active,
     onDrop: async (paths) => {
@@ -309,8 +154,7 @@ export default function Watermark({ active }: Props) {
       const preserveEditContext = options?.preserveEditContext && image;
       setImage(info);
       setRect(preserveEditContext ? clampRectToImage(rect, info) : getDefaultRect(info));
-      setBrushStrokes([]);
-      setRedoBrushGestures([]);
+      clearBrushMask();
       setRepairTool(preserveEditContext && removeMode === "repair" && !simpleMode ? "brush" : "rect");
       if (!preserveEditContext) {
         setRepairMaskBase("rect");
@@ -354,8 +198,7 @@ export default function Watermark({ active }: Props) {
     setEditorMode("advanced");
     setRepairMaskBase("blank");
     setRepairTool("brush");
-    setBrushStrokes([]);
-    setRedoBrushGestures([]);
+    clearBrushMask();
   }
 
   function applyCornerWatermarkPreset() {
@@ -366,8 +209,7 @@ export default function Watermark({ active }: Props) {
     setEditorMode("simple");
     setRepairMaskBase("rect");
     setRepairTool("rect");
-    setBrushStrokes([]);
-    setRedoBrushGestures([]);
+    clearBrushMask();
     setHoverPoint(null);
     toast.info("已套用右下角小水印选区");
   }
@@ -554,51 +396,6 @@ export default function Watermark({ active }: Props) {
     ctx.restore();
   }, [activeBrushStrokes, activeRepairMaskBase, activeRepairTool, blurStrength, brushSize, fillColor, fillOpacity, hoverPoint, rect, removeMode, scale]);
 
-  function drawImageMagnifier(
-    sourceImage: HTMLImageElement,
-    targetCanvas: HTMLCanvasElement,
-    sourceWidth: number,
-    sourceHeight: number,
-    ox: number,
-    oy: number,
-    targetSize: number,
-    sampleSize: number
-  ) {
-    const ctx = targetCanvas.getContext("2d");
-    if (!ctx) return;
-
-    const drawWidth = sourceImage.naturalWidth || sourceImage.width;
-    const drawHeight = sourceImage.naturalHeight || sourceImage.height;
-    if (!drawWidth || !drawHeight || sourceWidth <= 0 || sourceHeight <= 0) return;
-
-    const px = (ox / sourceWidth) * drawWidth;
-    const py = (oy / sourceHeight) * drawHeight;
-    const actualSampleSize = Math.min(sampleSize, Math.max(12, Math.min(drawWidth, drawHeight)));
-    const sx = clamp(px - actualSampleSize / 2, 0, Math.max(0, drawWidth - actualSampleSize));
-    const sy = clamp(py - actualSampleSize / 2, 0, Math.max(0, drawHeight - actualSampleSize));
-
-    targetCanvas.width = targetSize;
-    targetCanvas.height = targetSize;
-    ctx.clearRect(0, 0, targetSize, targetSize);
-    ctx.imageSmoothingEnabled = false;
-    ctx.drawImage(sourceImage, sx, sy, actualSampleSize, actualSampleSize, 0, 0, targetSize, targetSize);
-
-    ctx.save();
-    ctx.strokeStyle = "rgba(255,255,255,0.95)";
-    ctx.lineWidth = 1.5;
-    ctx.beginPath();
-    ctx.moveTo(targetSize / 2, 0);
-    ctx.lineTo(targetSize / 2, targetSize);
-    ctx.moveTo(0, targetSize / 2);
-    ctx.lineTo(targetSize, targetSize / 2);
-    ctx.stroke();
-
-    ctx.strokeStyle = "rgba(15,23,42,0.28)";
-    ctx.lineWidth = 1;
-    ctx.strokeRect(0.5, 0.5, targetSize - 1, targetSize - 1);
-    ctx.restore();
-  }
-
   useEffect(() => {
     if (
       !compareHoverPoint ||
@@ -718,54 +515,6 @@ export default function Watermark({ active }: Props) {
     sampleCtx.drawImage(imgRef.current, 0, 0, sampleCanvas.width, sampleCanvas.height);
     const pixel = sampleCtx.getImageData(Math.round(mx), Math.round(my), 1, 1).data;
     setFillColor(`#${[pixel[0], pixel[1], pixel[2]].map((value) => value.toString(16).padStart(2, "0")).join("")}`);
-  }
-
-  function addBrushStroke(ox: number, oy: number, erase: boolean, start: boolean) {
-    if (start && redoBrushGestures.length > 0) {
-      setRedoBrushGestures([]);
-    }
-
-    setBrushStrokes((prev) => {
-      const nextStroke = {
-        x: Number(ox.toFixed(2)),
-        y: Number(oy.toFixed(2)),
-        size: brushSize,
-        erase,
-        start,
-      };
-      const last = prev[prev.length - 1];
-      if (
-        !start &&
-        last &&
-        last.erase === nextStroke.erase &&
-        last.size === nextStroke.size &&
-        Math.hypot(last.x - nextStroke.x, last.y - nextStroke.y) < Math.max(1.5, brushSize * 0.18)
-      ) {
-        return prev;
-      }
-      return [...prev, nextStroke];
-    });
-  }
-
-  function handleUndoBrushStroke() {
-    if (processing) return;
-
-    const gestures = splitBrushGestures(brushStrokes);
-    if (!gestures.length) return;
-
-    const nextGestures = gestures.slice(0, -1);
-    const undoneGesture = gestures[gestures.length - 1];
-    setBrushStrokes(flattenBrushGestures(nextGestures));
-    setRedoBrushGestures((prev) => [undoneGesture, ...prev]);
-  }
-
-  function handleRedoBrushStroke() {
-    if (processing) return;
-    if (!redoBrushGestures.length) return;
-
-    const [gesture, ...remaining] = redoBrushGestures;
-    setBrushStrokes((prev) => prev.concat(gesture));
-    setRedoBrushGestures(remaining);
   }
 
   async function loadResultPreview(path: string) {
@@ -1062,191 +811,54 @@ export default function Watermark({ active }: Props) {
     });
   }, [batchProgress, image, processing, processingDetail, processingMode, removeMode]);
 
-  useEffect(() => {
-    if (processing || !active || simpleMode || removeMode !== "repair" || (!brushStrokes.length && !redoBrushGestures.length)) return;
-
-    function handleKeyDown(event: KeyboardEvent) {
-      const target = event.target;
-      const isEditable =
-        target instanceof HTMLElement &&
-        (target.tagName === "INPUT" || target.tagName === "TEXTAREA" || target.isContentEditable);
-
-      if (isEditable) return;
-
-      if (event.metaKey || event.ctrlKey) {
-        const key = event.key.toLowerCase();
-
-        if (key === "z") {
-          event.preventDefault();
-          if (event.shiftKey) {
-            handleRedoBrushStroke();
-          } else {
-            handleUndoBrushStroke();
-          }
-          return;
-        }
-
-        if (key === "y") {
-          event.preventDefault();
-          handleRedoBrushStroke();
-        }
-      }
-    }
-
-    window.addEventListener("keydown", handleKeyDown);
-    return () => {
-      window.removeEventListener("keydown", handleKeyDown);
-    };
-  }, [active, brushStrokes.length, processing, redoBrushGestures, removeMode, simpleMode]);
-
-  const canvasHint =
-    removeMode === "repair"
-      ? simpleMode
-        ? "拖动矩形框住水印后直接执行基础修复。需要补涂、擦除或空蒙版时，再切到高级模式。"
-        : activeRepairTool === "rect"
-          ? activeRepairMaskBase === "rect"
-            ? "拖动矩形定义基础修复区域，再切到补涂或擦除精修蒙版。"
-            : "拖动矩形做定位参考；空蒙版模式下，真正的修复区域需要用笔刷补涂出来。"
-          : activeRepairTool === "brush"
-            ? activeRepairMaskBase === "rect"
-              ? "在画布上补涂需要修复的区域；矩形选区会作为默认基础蒙版。"
-              : "空蒙版模式下，从需要修复的位置开始补涂，适合不规则或分散的小水印。"
-            : activeRepairMaskBase === "rect"
-              ? "在画布上擦除误选区域；适合把修复范围从矩形里抠细。"
-              : "在画布上擦除误涂区域；空蒙版模式下，建议先补涂再用擦除细修边缘。"
-      : "拖动框选区域，拖动边角调整大小。颜色覆盖模式下可右键取色。";
-  const magnifierZoom = (MAGNIFIER_SIZE / MAGNIFIER_SAMPLE_SIZE).toFixed(1);
-  const imageArea = image ? image.width * image.height : 0;
-  const selectionAreaRatio = imageArea > 0 ? (rect.w * rect.h) / imageArea : 0;
-  const simpleRepairNeedsPrecision = removeMode === "repair" && simpleMode && selectionAreaRatio > SIMPLE_REPAIR_MAX_AREA_RATIO;
-  const selectionAreaPercent = (selectionAreaRatio * 100).toFixed(1);
-  const manualStrokeCount = brushGestureCount;
-  const smartTips: SmartTip[] = [];
-
-  if (removeMode === "repair") {
-    if (simpleMode) {
-      smartTips.push({
-        tone: "info",
-        title: "当前是简洁模式",
-        description: "现在只用矩形快速修复，先把水印框准就能直接处理。需要补涂、擦除或空蒙版时，再打开高级模式。",
-        primaryAction: {
-          label: "打开高级模式",
-          onClick: () => setEditorMode("advanced"),
-        },
-      });
-    }
-
-    if (simpleRepairNeedsPrecision) {
-      smartTips.unshift({
-        tone: "warning",
-        title: "当前选区偏大，直接修复会更容易发糊",
-        description: `现在的选区约占整图 ${selectionAreaPercent}%。简洁模式更适合小水印；这种范围建议切到高级模式，用空蒙版只补涂水印本体。`,
-        primaryAction: {
-          label: "切到精修",
-          onClick: () => switchToPreciseRepair(),
-        },
-      });
-    }
-
-    if (!simpleMode && activeRepairMaskBase === "blank" && manualStrokeCount === 0) {
-      smartTips.push({
-        tone: "warning",
-        title: "空蒙版还没有修复区域",
-        description: "当前矩形只用于定位，不会参与修复。执行前先切到补涂，把真正需要处理的区域画出来。",
-        primaryAction: {
-          label: "切到补涂",
-          onClick: () => setRepairTool("brush"),
-        },
-      });
-    }
-
-    if (!simpleMode && activeRepairMaskBase === "rect" && selectionAreaRatio > 0.12 && manualStrokeCount === 0) {
-      smartTips.push({
-        tone: "warning",
-        title: "修复范围偏大",
-        description: "当前矩形覆盖面积较大，整块修复容易伤到周边内容。更稳的做法是切到空蒙版，只涂水印本体。",
-        primaryAction: {
-          label: "改为空蒙版",
-          onClick: () => {
-            setRepairMaskBase("blank");
-            setRepairTool("brush");
-          },
-        },
-      });
-    }
-
-    if (!simpleMode && activeRepairTool === "rect" && manualStrokeCount > 0) {
-      smartTips.push({
-        tone: "info",
-        title: "已经进入精修阶段",
-        description: "你已经有手工蒙版了。继续微调时，直接切到补涂或擦除会比反复拖框更顺手。",
-        primaryAction: {
-          label: "切到补涂",
-          onClick: () => setRepairTool("brush"),
-        },
-        secondaryAction: {
-          label: "切到擦除",
-          onClick: () => setRepairTool("erase"),
-        },
-      });
-    }
-
-    if (result?.output_path) {
-      smartTips.push({
-        tone: "success",
-        title: "结果图可以直接继续精修",
-        description: "如果边缘还有一点不自然，直接进入结果图继续补涂或擦除，比重新从原图开始更省事。",
-        primaryAction: {
-          label: "继续精修",
-          onClick: () => {
-            void handleContinueRefine();
-          },
-        },
-      });
-    }
-  } else if (removeMode === "fill" && selectionAreaRatio > 0.08) {
-    smartTips.push({
-      tone: "warning",
-      title: "填色区域偏大",
-      description: "颜色覆盖更适合纯色背景和小范围遮挡。当前范围较大时，边缘会更容易显眼，建议改成基础修复。",
-      primaryAction: {
-        label: "切到基础修复",
-        onClick: () => setRemoveMode("repair"),
+  const {
+    canvasHint,
+    magnifierZoom,
+    selectionAreaRatio,
+    simpleRepairNeedsPrecision,
+    selectionAreaPercent,
+    manualStrokeCount,
+    primaryActionLabel,
+  } = getWatermarkViewState({
+    imageWidth: image?.width ?? 0,
+    imageHeight: image?.height ?? 0,
+    rect,
+    removeMode,
+    simpleMode,
+    activeRepairTool,
+    activeRepairMaskBase,
+    brushGestureCount,
+    processing,
+  });
+  const smartTips = buildWatermarkSmartTips({
+    removeMode,
+    simpleMode,
+    activeRepairTool,
+    activeRepairMaskBase,
+    simpleRepairNeedsPrecision,
+    selectionAreaPercent,
+    selectionAreaRatio,
+    manualStrokeCount,
+    hasResult: Boolean(result?.output_path),
+    actions: {
+      openAdvancedMode: () => setEditorMode("advanced"),
+      switchToPreciseRepair,
+      switchToBrush: () => setRepairTool("brush"),
+      switchToErase: () => setRepairTool("erase"),
+      switchToBlankBrush: () => {
+        setRepairMaskBase("blank");
+        setRepairTool("brush");
       },
-    });
-  } else if (removeMode === "blur" && selectionAreaRatio > 0.12) {
-    smartTips.push({
-      tone: "warning",
-      title: "模糊范围偏大",
-      description: "模糊更适合快速遮挡。当前范围较大时，画面会明显发糊，建议缩小范围或换成基础修复。",
-      primaryAction: {
-        label: "切到基础修复",
-        onClick: () => setRemoveMode("repair"),
+      continueRefine: () => {
+        void handleContinueRefine();
       },
-    });
-  }
+      switchToRepairMode: () => setRemoveMode("repair"),
+    },
+  });
 
   return (
     <div className="space-y-6 p-6">
-      <Card className="overflow-hidden">
-        <CardContent className="px-5 py-5">
-          <div
-            onClick={handleSelectFile}
-            className={cn("drop-zone flex flex-col items-center justify-center", dragging && "dragging")}
-          >
-            <div className="mb-4 flex h-12 w-12 items-center justify-center rounded-[8px] border border-slate-200 bg-slate-50 text-[var(--brand-700)]">
-              <Icon
-                name={dragging ? "folderOpen" : "magic"}
-                size={30}
-                className={loading ? "animate-pulse" : undefined}
-              />
-            </div>
-            <div className="text-lg font-semibold text-slate-900">
-              {loading ? "正在载入图片" : dragging ? "松开以载入图片" : "拖入图片，或点击选择"}
-            </div>
-          </div>
-        </CardContent>
-      </Card>
+      <WatermarkDropCard dragging={dragging} loading={loading} onSelectFile={handleSelectFile} />
 
       {!image ? null : (
         <div className="space-y-6">
@@ -1450,10 +1062,7 @@ export default function Watermark({ active }: Props) {
                           <Button
                             variant="secondary"
                             size="sm"
-                            onClick={() => {
-                              setBrushStrokes([]);
-                              setRedoBrushGestures([]);
-                            }}
+                            onClick={clearBrushMask}
                             disabled={processing || !hasMaskEdits}
                           >
                             清空涂抹
@@ -1548,41 +1157,7 @@ export default function Watermark({ active }: Props) {
                   </div>
                 </div>
 
-                {smartTips.slice(0, 2).map((tip, index) => (
-                  <div
-                    key={`${tip.title}-${index}`}
-                    className={cn(
-                      "space-y-3 rounded-[10px] border px-4 py-4",
-                      tip.tone === "warning" && "border-amber-100 bg-amber-50/80",
-                      tip.tone === "info" && "border-blue-100 bg-blue-50/75",
-                      tip.tone === "success" && "border-emerald-100 bg-emerald-50/75"
-                    )}
-                  >
-                    <div className="flex items-start justify-between gap-3">
-                      <div>
-                        <div className="text-sm font-medium text-slate-900">{tip.title}</div>
-                        <div className="mt-1 text-xs leading-5 text-slate-600">{tip.description}</div>
-                      </div>
-                      <Badge tone={tip.tone === "warning" ? "warning" : tip.tone === "success" ? "success" : "info"}>
-                        提示
-                      </Badge>
-                    </div>
-                    {(tip.primaryAction || tip.secondaryAction) && (
-                      <div className="flex flex-wrap gap-2">
-                        {tip.primaryAction && (
-                          <Button variant="secondary" size="sm" onClick={tip.primaryAction.onClick}>
-                            {tip.primaryAction.label}
-                          </Button>
-                        )}
-                        {tip.secondaryAction && (
-                          <Button variant="secondary" size="sm" onClick={tip.secondaryAction.onClick}>
-                            {tip.secondaryAction.label}
-                          </Button>
-                        )}
-                      </div>
-                    )}
-                  </div>
-                ))}
+                <WatermarkSmartTips tips={smartTips} />
 
                 <div className="rounded-[10px] border border-slate-200 bg-slate-50 px-4 py-4">
                   <div className="text-sm font-medium text-slate-800">同模板复用</div>
@@ -1616,88 +1191,24 @@ export default function Watermark({ active }: Props) {
                   )}
                 </div>
 
-                {result && (
-                  <div className="space-y-3 rounded-[10px] border border-emerald-100 bg-emerald-50/70 px-4 py-4">
-                    <div className="flex items-center justify-between gap-3">
-                      <div className="text-sm font-medium text-emerald-900">最近输出</div>
-                      <Badge tone="success">已生成</Badge>
-                    </div>
-                    <div className="break-all font-mono text-xs leading-5 text-emerald-900/80">{result.output_path}</div>
-                    <div className="grid gap-2 sm:grid-cols-2">
-                      <Button variant="secondary" size="sm" onClick={() => void fileActions.openFile(result.output_path)}>
-                        打开结果
-                      </Button>
-                      <Button variant="secondary" size="sm" onClick={() => void fileActions.revealInDir(result.output_path)}>
-                        打开位置
-                      </Button>
-                      <Button variant="primary" size="sm" className="sm:col-span-2" onClick={() => void handleContinueRefine()}>
-                        继续精修当前结果
-                      </Button>
-                    </div>
-                    <div className="text-xs leading-5 text-emerald-900/70">
-                      会保留当前模式和选区，并清空上一轮手工蒙版，方便在结果图上继续补涂或微调。
-                    </div>
-                  </div>
-                )}
-
-                {batchResults.length > 0 && (
-                  <div className="space-y-3 rounded-[10px] border border-sky-100 bg-sky-50/70 px-4 py-4">
-                    <div className="flex items-center justify-between gap-3">
-                      <div className="text-sm font-medium text-sky-900">批量结果</div>
-                      <Badge tone="info">
-                        成功 {batchResults.filter((item) => item.success).length} / {batchResults.length}
-                      </Badge>
-                    </div>
-                    <div className="max-h-56 space-y-2 overflow-auto pr-1">
-                      {batchResults.map((item, index) => (
-                        <div
-                          key={`${item.output_path || item.message}-${index}`}
-                          className={cn(
-                            "rounded-[10px] border px-3 py-3",
-                            item.success ? "border-emerald-100 bg-white/80" : "border-rose-100 bg-white/80"
-                          )}
-                        >
-                          <div className="flex items-center justify-between gap-3">
-                            <div className="min-w-0 flex-1">
-                              <div className={cn("truncate text-sm font-medium", item.success ? "text-slate-900" : "text-rose-900")}>
-                                {item.success ? item.output_path : item.message}
-                              </div>
-                              {item.success && <div className="mt-1 truncate text-xs text-slate-500">{item.message}</div>}
-                            </div>
-                            <Badge tone={item.success ? "success" : "danger"}>{item.success ? "成功" : "失败"}</Badge>
-                          </div>
-                          {item.success && item.output_path && (
-                            <div className="mt-3 flex flex-wrap gap-2">
-                              <Button variant="secondary" size="sm" onClick={() => void fileActions.openFile(item.output_path)}>
-                                打开
-                              </Button>
-                              <Button variant="secondary" size="sm" onClick={() => void fileActions.revealInDir(item.output_path)}>
-                                定位
-                              </Button>
-                            </div>
-                          )}
-                        </div>
-                      ))}
-                    </div>
-                  </div>
-                )}
+                <WatermarkResultActions
+                  result={result}
+                  batchResults={batchResults}
+                  onOpenFile={fileActions.openFile}
+                  onRevealInDir={fileActions.revealInDir}
+                  onContinueRefine={handleContinueRefine}
+                />
 
                 <div className="space-y-3 border-t border-slate-100 pt-4">
                   <Button variant="primary" className="w-full" onClick={handleRemove} disabled={processing}>
-                    {processing
-                      ? "处理中…"
-                      : simpleRepairNeedsPrecision
-                        ? "当前范围偏大，先切到高级精修"
-                        : removeMode === "repair"
-                          ? "执行基础修复"
-                          : "应用处理"}
+                    {primaryActionLabel}
                   </Button>
                   <Button
                     variant="secondary"
                     className="w-full"
                     onClick={() => {
                       setImage(null);
-                      setBrushStrokes([]);
+                      clearBrushStrokes();
                       setHoverPoint(null);
                       setCompareHoverPoint(null);
                       setResult(null);
@@ -1714,115 +1225,18 @@ export default function Watermark({ active }: Props) {
           </div>
 
           {(loadingResultPreview || resultPreview) && (
-            <Card className="overflow-hidden">
-              <CardHeader>
-                <div>
-                  <CardTitle>前后对比</CardTitle>
-                  <div className="mt-1 text-sm text-slate-500">使用结果缩略图对比处理前后，拖动滑杆查看差异。</div>
-                </div>
-                <Badge tone="info">{loadingResultPreview ? "生成中" : "已更新"}</Badge>
-              </CardHeader>
-              <CardContent className="space-y-4">
-                {loadingResultPreview || !resultPreview ? (
-                  <div className="flex min-h-[220px] items-center justify-center rounded-[24px] border border-slate-200 bg-slate-50 text-sm text-slate-500">
-                    正在生成对比预览…
-                  </div>
-                ) : (
-                  <>
-                    <div className="rounded-[24px] border border-slate-200 bg-slate-100 p-4">
-                      <div
-                        className="relative mx-auto w-full max-w-[760px] overflow-hidden rounded-[20px] bg-slate-950/5 cursor-crosshair"
-                        style={{ aspectRatio: `${image.width} / ${image.height}` }}
-                        onMouseMove={handleCompareMouseMove}
-                        onMouseLeave={handleCompareMouseLeave}
-                      >
-                        <img src={getPreviewImageSrc(image)} alt="原图" className="absolute inset-0 h-full w-full object-contain" />
-                        <div className="absolute inset-y-0 left-0 overflow-hidden" style={{ width: `${compareSplit}%` }}>
-                          <img src={getPreviewImageSrc(resultPreview)} alt="处理后" className="absolute inset-0 h-full w-full object-contain" />
-                        </div>
-                        <div className="absolute left-3 top-3 rounded-full bg-white/88 px-3 py-1 text-xs font-medium text-slate-700 shadow-[0_6px_16px_rgba(15,23,42,0.12)]">
-                          原图
-                        </div>
-                        <div className="absolute right-3 top-3 rounded-full bg-slate-900/78 px-3 py-1 text-xs font-medium text-white shadow-[0_6px_16px_rgba(15,23,42,0.24)]">
-                          处理后
-                        </div>
-                        <div className="pointer-events-none absolute inset-y-0 z-10" style={{ left: `calc(${compareSplit}% - 1px)` }}>
-                          <div className="relative h-full w-0.5 bg-white shadow-[0_0_0_1px_rgba(15,23,42,0.08),0_0_18px_rgba(255,255,255,0.5)]">
-                            <div className="absolute left-1/2 top-1/2 flex h-9 w-9 -translate-x-1/2 -translate-y-1/2 items-center justify-center rounded-full border border-white/80 bg-white text-slate-700 shadow-[0_10px_30px_rgba(15,23,42,0.16)]">
-                              ⇆
-                            </div>
-                          </div>
-                        </div>
-                        {compareHoverPoint && (
-                          <div
-                            className="pointer-events-none absolute z-20"
-                            style={{
-                              left: compareHoverPoint.x,
-                              top: compareHoverPoint.y,
-                              transform: "translate(-50%, -50%)",
-                            }}
-                          >
-                            <div className="relative flex h-8 w-8 items-center justify-center rounded-full border border-white/85 bg-white/30 shadow-[0_8px_24px_rgba(15,23,42,0.14)] backdrop-blur-[1px]">
-                              <div className="absolute inset-x-1 top-1/2 h-px -translate-y-1/2 bg-white/95" />
-                              <div className="absolute inset-y-1 left-1/2 w-px -translate-x-1/2 bg-white/95" />
-                            </div>
-                          </div>
-                        )}
-                      </div>
-                    </div>
-
-                    <div className="grid gap-3 sm:grid-cols-[minmax(0,1fr)_auto] sm:items-center">
-                      <Slider min={0} max={100} value={compareSplit} onValueChange={setCompareSplit} />
-                      <Badge tone="default">处理后显示 {compareSplit}%</Badge>
-                    </div>
-
-                    <div className="rounded-[24px] border border-slate-200 bg-slate-50 px-4 py-4">
-                      <div className="mb-3 flex items-center justify-between gap-3">
-                        <div className="text-sm font-medium text-slate-800">局部前后放大对比</div>
-                        <Badge tone="default">{(COMPARE_MAGNIFIER_SIZE / COMPARE_MAGNIFIER_SAMPLE_SIZE).toFixed(1)}x</Badge>
-                      </div>
-                      <div className="grid gap-3 md:grid-cols-2">
-                        <div className="rounded-[10px] border border-slate-200 bg-white p-3">
-                          <div className="mb-2 text-xs font-medium text-slate-500">原图局部</div>
-                          {compareHoverPoint ? (
-                            <canvas
-                              ref={compareOriginalMagnifierRef}
-                              className="mx-auto h-44 w-44 rounded-[10px] border border-slate-200 bg-white shadow-[inset_0_0_0_1px_rgba(255,255,255,0.85)]"
-                            />
-                          ) : (
-                            <div className="mx-auto flex h-44 w-44 items-center justify-center rounded-[10px] border border-dashed border-slate-200 bg-slate-50 text-center text-xs leading-5 text-slate-400">
-                              将鼠标移到上方对比图
-                              <br />
-                              查看原图局部
-                            </div>
-                          )}
-                        </div>
-                        <div className="rounded-[10px] border border-slate-200 bg-white p-3">
-                          <div className="mb-2 text-xs font-medium text-slate-500">处理后局部</div>
-                          {compareHoverPoint ? (
-                            <canvas
-                              ref={compareResultMagnifierRef}
-                              className="mx-auto h-44 w-44 rounded-[10px] border border-slate-200 bg-white shadow-[inset_0_0_0_1px_rgba(255,255,255,0.85)]"
-                            />
-                          ) : (
-                            <div className="mx-auto flex h-44 w-44 items-center justify-center rounded-[10px] border border-dashed border-slate-200 bg-slate-50 text-center text-xs leading-5 text-slate-400">
-                              将鼠标移到上方对比图
-                              <br />
-                              查看修复后局部
-                            </div>
-                          )}
-                        </div>
-                      </div>
-                      <div className="mt-3 text-xs leading-5 text-slate-500">
-                        {compareHoverPoint
-                          ? `当前检查位置 ${Math.round(compareHoverPoint.ox)}, ${Math.round(compareHoverPoint.oy)}`
-                          : "适合检查修复边缘、细字笔画和颜色过渡。"}
-                      </div>
-                    </div>
-                  </>
-                )}
-              </CardContent>
-            </Card>
+            <WatermarkResultCompare
+              image={image}
+              resultPreview={resultPreview}
+              loadingResultPreview={loadingResultPreview}
+              compareSplit={compareSplit}
+              compareHoverPoint={compareHoverPoint}
+              compareOriginalMagnifierRef={compareOriginalMagnifierRef}
+              compareResultMagnifierRef={compareResultMagnifierRef}
+              onCompareMouseMove={handleCompareMouseMove}
+              onCompareMouseLeave={handleCompareMouseLeave}
+              onCompareSplitChange={setCompareSplit}
+            />
           )}
         </div>
       )}
