@@ -19,6 +19,8 @@ import { cn } from "./utils/cn";
 import "./index.css";
 
 const FileStats = lazy(() => import("./pages/FileStats"));
+const FileOrganize = lazy(() => import("./pages/FileOrganize"));
+const BatchRename = lazy(() => import("./pages/BatchRename"));
 const Dedup = lazy(() => import("./pages/Dedup"));
 const VideoCut = lazy(() => import("./pages/VideoCut"));
 const BatchVideoTrim = lazy(() => import("./pages/BatchVideoTrim"));
@@ -26,10 +28,12 @@ const VideoConvert = lazy(() => import("./pages/VideoConvert"));
 const TextToImage = lazy(() => import("./pages/TextToImage"));
 const Watermark = lazy(() => import("./pages/Watermark"));
 
-type Tab = "stats" | "dedup" | "video-cut" | "batch-video-trim" | "video-convert" | "text-to-image" | "watermark";
+type Tab = "stats" | "file-organize" | "batch-rename" | "dedup" | "video-cut" | "batch-video-trim" | "video-convert" | "text-to-image" | "watermark";
 
 const tabMeta: Record<Tab, { label: string; icon: IconName; section: string }> = {
   stats: { label: "文件统计", icon: "stats", section: "文件" },
+  "file-organize": { label: "文件归类", icon: "folder", section: "文件" },
+  "batch-rename": { label: "批量重命名", icon: "file", section: "文件" },
   dedup: { label: "文件去重", icon: "duplicate", section: "文件" },
   "video-cut": { label: "视频截取", icon: "scissors", section: "视频" },
   "batch-video-trim": { label: "批量去头", icon: "batch", section: "视频" },
@@ -260,6 +264,12 @@ function App() {
               <div className="flex-1 overflow-auto bg-[var(--panel)] px-3 py-3" data-main-scroll="true">
                 <PageSlot active={activeTab === "stats"} visited={visitedTabs.has("stats")}>
                   <FileStats key={`stats-${resetKey}`} active={activeTab === "stats"} />
+                </PageSlot>
+                <PageSlot active={activeTab === "file-organize"} visited={visitedTabs.has("file-organize")}>
+                  <FileOrganize key={`organize-${resetKey}`} active={activeTab === "file-organize"} />
+                </PageSlot>
+                <PageSlot active={activeTab === "batch-rename"} visited={visitedTabs.has("batch-rename")}>
+                  <BatchRename key={`rename-${resetKey}`} active={activeTab === "batch-rename"} />
                 </PageSlot>
                 <PageSlot active={activeTab === "dedup"} visited={visitedTabs.has("dedup")}>
                   <Dedup key={`dedup-${resetKey}`} active={activeTab === "dedup"} />

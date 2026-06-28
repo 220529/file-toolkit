@@ -9,6 +9,7 @@ import type { RatioId, StylePresetId } from "./types";
 
 export const officialBaseUrl = "https://api.openai.com";
 export const storageKey = "xwm.textToImage.config.v1";
+export const historyStorageKey = "xwm.textToImage.history.v1";
 
 export const modelOptions: Array<{ value: ImageModel; label: string; badge?: string }> = [
   { value: "gpt-image-2", label: "GPT Image 2", badge: "默认" },

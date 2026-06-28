@@ -18,7 +18,7 @@ export function useTextToImageForm(active: boolean) {
   const storedConfig = useStoredTextToImageConfig();
   const [prompt, setPrompt] = useState("");
   const [apiKey, setApiKey] = useState("");
-  const [providerMode, setProviderMode] = useState<ProviderMode>(storedConfig.providerMode || "codex");
+  const [providerMode, setProviderMode] = useState<ProviderMode>(storedConfig.providerMode || "default");
   const [baseUrl, setBaseUrl] = useState(storedConfig.baseUrl || "");
   const [model, setModel] = useState<ImageModel>(storedConfig.model || "gpt-image-2");
   const [ratio, setRatio] = useState<RatioId>(storedConfig.ratio || "square");
@@ -36,10 +36,9 @@ export function useTextToImageForm(active: boolean) {
 
   const selectedRatio = ratioOptions.find((item) => item.id === ratio) ?? ratioOptions[0];
   const effectivePrompt = useMemo(() => buildPrompt(prompt, stylePreset), [prompt, stylePreset]);
-  const effectiveBaseUrl =
-    providerMode === "official" ? officialBaseUrl : providerMode === "codex" ? serviceConfig.codexBaseUrl : baseUrl.trim();
+  const effectiveBaseUrl = providerMode === "official" ? officialBaseUrl : baseUrl.trim();
   const hasCredential = Boolean(
-    apiKey.trim() || serviceConfig.hasEnvKey || (providerMode === "codex" && serviceConfig.hasCodexKey)
+    apiKey.trim() || serviceConfig.hasEnvKey || (providerMode === "default" && serviceConfig.hasCodexKey)
   );
   const promptLength = prompt.trim().length;
 

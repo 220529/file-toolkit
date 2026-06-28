@@ -4,7 +4,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use tauri::{AppHandle, Manager};
 
 use super::logger::{log_error, log_info};
@@ -53,6 +53,30 @@ pub struct ImageGenerationConfig {
     pub default_output_dir: String,
 }
 
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TestImageGenerationRequest {
+    pub api_key: Option<String>,
+    pub base_url: Option<String>,
+    pub use_codex_config: Option<bool>,
+    pub model: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct ImageGenerationTestResult {
+    pub ok: bool,
+    pub endpoint: String,
+    pub models_endpoint: String,
+    pub model: String,
+    pub has_requested_model: bool,
+    pub image_models: Vec<String>,
+    pub models_status: Option<u16>,
+    pub generation_status: Option<u16>,
+    pub elapsed_ms: u64,
+    pub message: String,
+    pub detail: Option<String>,
+}
+
 struct CodexProviderConfig {
     codex_home: PathBuf,
     provider: String,
@@ -62,6 +86,16 @@ struct CodexProviderConfig {
 #[derive(Debug, Deserialize)]
 struct OpenAIImageResponse {
     data: Vec<OpenAIImageData>,
+}
+
+#[derive(Debug, Deserialize)]
+struct OpenAIModelsResponse {
+    data: Vec<OpenAIModelData>,
+}
+
+#[derive(Debug, Deserialize)]
+struct OpenAIModelData {
+    id: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -231,6 +265,172 @@ pub async fn generate_image(
         created_ms,
         model,
         revised_prompt: decoded.revised_prompt,
+    })
+}
+
+#[tauri::command]
+pub async fn test_image_generation(
+    request: TestImageGenerationRequest,
+) -> Result<ImageGenerationTestResult, String> {
+    let started = Instant::now();
+    let codex_config = request
+        .use_codex_config
+        .unwrap_or(false)
+        .then(read_codex_provider_config)
+        .flatten();
+    let api_key = resolve_api_key(request.api_key, codex_config.as_ref())?;
+    let model = validate_model(request.model.as_deref().unwrap_or(DEFAULT_MODEL))?;
+    let image_endpoint =
+        resolve_image_endpoint(request.base_url.as_deref(), codex_config.as_ref())?;
+    let models_endpoint = image_endpoint_to_models_endpoint(&image_endpoint)?;
+
+    log_info(&format!(
+        "[文生图] 开始自检: model={}, endpoint={}",
+        model, image_endpoint
+    ));
+
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(180))
+        .build()
+        .map_err(|e| format!("初始化网络客户端失败: {}", e))?;
+
+    let models_response = client
+        .get(&models_endpoint)
+        .bearer_auth(&api_key)
+        .send()
+        .await
+        .map_err(|e| format!("请求模型列表失败: {}", e))?;
+    let models_status = models_response.status().as_u16();
+    let models_body = models_response
+        .text()
+        .await
+        .map_err(|e| format!("读取模型列表响应失败: {}", e))?;
+
+    if !(200..300).contains(&models_status) {
+        let message = extract_error_message(models_status, &models_body);
+        log_error(&format!("[文生图] 自检失败: {}", message));
+        return Ok(ImageGenerationTestResult {
+            ok: false,
+            endpoint: image_endpoint,
+            models_endpoint,
+            model,
+            has_requested_model: false,
+            image_models: Vec::new(),
+            models_status: Some(models_status),
+            generation_status: None,
+            elapsed_ms: elapsed_millis(started),
+            message: diagnose_image_generation_error(&message),
+            detail: Some(message),
+        });
+    }
+
+    let models = parse_model_ids(&models_body)?;
+    let image_models = filter_image_model_ids(&models);
+    let has_requested_model = models.iter().any(|id| id == &model);
+
+    if !has_requested_model {
+        let message = format!("模型列表中没有 {}", model);
+        log_error(&format!("[文生图] 自检失败: {}", message));
+        return Ok(ImageGenerationTestResult {
+            ok: false,
+            endpoint: image_endpoint,
+            models_endpoint,
+            model,
+            has_requested_model,
+            image_models,
+            models_status: Some(models_status),
+            generation_status: None,
+            elapsed_ms: elapsed_millis(started),
+            message,
+            detail: Some("请切换到模型列表中可见的图片模型，或检查中转模型映射。".to_string()),
+        });
+    }
+
+    let payload = json!({
+        "model": model,
+        "prompt": "Connection test image: one small blue circle on a plain white background. No extra text.",
+        "size": DEFAULT_SIZE,
+        "quality": "low",
+        "output_format": DEFAULT_OUTPUT_FORMAT,
+        "n": 1,
+        "stream": true
+    });
+
+    let response = client
+        .post(&image_endpoint)
+        .bearer_auth(api_key)
+        .json(&payload)
+        .send()
+        .await
+        .map_err(|e| format!("请求图片生成失败: {}", e))?;
+    let generation_status = response.status().as_u16();
+    let content_type = response
+        .headers()
+        .get(reqwest::header::CONTENT_TYPE)
+        .and_then(|value| value.to_str().ok())
+        .unwrap_or_default()
+        .to_string();
+    let generation_body = response
+        .text()
+        .await
+        .map_err(|e| format!("读取图片生成响应失败: {}", e))?;
+
+    if !(200..300).contains(&generation_status) {
+        let detail = extract_error_message(generation_status, &generation_body);
+        log_error(&format!("[文生图] 自检失败: {}", detail));
+        return Ok(ImageGenerationTestResult {
+            ok: false,
+            endpoint: image_endpoint,
+            models_endpoint,
+            model,
+            has_requested_model,
+            image_models,
+            models_status: Some(models_status),
+            generation_status: Some(generation_status),
+            elapsed_ms: elapsed_millis(started),
+            message: diagnose_image_generation_error(&detail),
+            detail: Some(detail),
+        });
+    }
+
+    let decoded = decode_image_response(&client, &generation_body, &content_type).await?;
+    if decoded.bytes.is_empty() {
+        return Ok(ImageGenerationTestResult {
+            ok: false,
+            endpoint: image_endpoint,
+            models_endpoint,
+            model,
+            has_requested_model,
+            image_models,
+            models_status: Some(models_status),
+            generation_status: Some(generation_status),
+            elapsed_ms: elapsed_millis(started),
+            message: "接口返回成功，但没有图片数据".to_string(),
+            detail: None,
+        });
+    }
+
+    log_info(&format!(
+        "[文生图] 自检通过: model={}, elapsed={}ms",
+        model,
+        elapsed_millis(started)
+    ));
+
+    Ok(ImageGenerationTestResult {
+        ok: true,
+        endpoint: image_endpoint,
+        models_endpoint,
+        model,
+        has_requested_model,
+        image_models,
+        models_status: Some(models_status),
+        generation_status: Some(generation_status),
+        elapsed_ms: elapsed_millis(started),
+        message: "连接正常，模型和图片生成权限可用".to_string(),
+        detail: Some(format!(
+            "测试图片响应 {} bytes，未写入输出目录。",
+            decoded.bytes.len()
+        )),
     })
 }
 
@@ -463,20 +663,15 @@ fn resolve_api_key(
     api_key: Option<String>,
     codex_config: Option<&CodexProviderConfig>,
 ) -> Result<String, String> {
-    if let Some(config) = codex_config {
-        if let Some(api_key) = read_codex_api_key(&config.codex_home) {
-            return Ok(api_key);
-        }
-    }
-
     api_key
         .and_then(|value| {
             let trimmed = value.trim().to_string();
             (!trimmed.is_empty()).then_some(trimmed)
         })
         .or_else(read_env_api_key)
+        .or_else(|| codex_config.and_then(|config| read_codex_api_key(&config.codex_home)))
         .ok_or_else(|| {
-            "缺少 API Key，请输入本次使用的 Key、设置 OPENAI_API_KEY，或启用可用的 Codex 配置"
+            "缺少 API Key，请输入本次使用的 Key、设置 OPENAI_API_KEY，或使用可用的默认配置"
                 .to_string()
         })
 }
@@ -578,6 +773,58 @@ fn normalize_image_endpoint(base_url: &str) -> Result<String, String> {
     Ok(format!("{}/v1/images/generations", trimmed))
 }
 
+fn image_endpoint_to_models_endpoint(image_endpoint: &str) -> Result<String, String> {
+    let trimmed = image_endpoint.trim().trim_end_matches('/');
+    let base = trimmed
+        .strip_suffix("/images/generations")
+        .ok_or_else(|| "无法从图片接口推导模型列表接口".to_string())?;
+    Ok(format!("{}/models", base))
+}
+
+fn parse_model_ids(body: &str) -> Result<Vec<String>, String> {
+    let parsed: OpenAIModelsResponse =
+        serde_json::from_str(body).map_err(|e| format!("解析模型列表失败: {}", e))?;
+    Ok(parsed.data.into_iter().map(|model| model.id).collect())
+}
+
+fn filter_image_model_ids(models: &[String]) -> Vec<String> {
+    let mut image_models: Vec<String> = models
+        .iter()
+        .filter(|model| {
+            let lower = model.to_ascii_lowercase();
+            lower.contains("image") || lower.contains("dall-e")
+        })
+        .cloned()
+        .collect();
+    image_models.sort();
+    image_models
+}
+
+fn elapsed_millis(started: Instant) -> u64 {
+    started.elapsed().as_millis().min(u128::from(u64::MAX)) as u64
+}
+
+fn diagnose_image_generation_error(message: &str) -> String {
+    let lower = message.to_ascii_lowercase();
+    if lower.contains("image generation is not enabled") || lower.contains("permission_error") {
+        return "当前 Key 或中转分组未开通图片生成权限".to_string();
+    }
+    if lower.contains("401") || lower.contains("unauthorized") || lower.contains("invalid api key")
+    {
+        return "API Key 无效或已过期".to_string();
+    }
+    if lower.contains("404") || lower.contains("model") && lower.contains("not found") {
+        return "当前服务不支持所选图片模型".to_string();
+    }
+    if lower.contains("timeout") || lower.contains("timed out") {
+        return "请求超时，服务可能排队较久或中转未正确转发流式响应".to_string();
+    }
+    if lower.contains("background") && lower.contains("transparent") {
+        return "所选模型不支持透明背景，请切换模型或背景模式".to_string();
+    }
+    "图片生成自检失败，请查看详情".to_string()
+}
+
 fn read_codex_provider_config() -> Option<CodexProviderConfig> {
     codex_home_candidates()
         .into_iter()
@@ -607,7 +854,7 @@ fn codex_home_candidates() -> Vec<PathBuf> {
     }
 
     if let Ok(home) = std::env::var("HOME") {
-        for name in [".codex-erp", ".codex"] {
+        for name in [".codex", ".codex-erp"] {
             let path = Path::new(&home).join(name);
             if !candidates.iter().any(|item| item == &path) {
                 candidates.push(path);
@@ -785,6 +1032,7 @@ fn extract_error_message(status: u16, body: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::time::{SystemTime, UNIX_EPOCH};
 
     #[test]
     fn sanitize_filename_part_uses_ascii_slug() {
@@ -864,6 +1112,39 @@ mod tests {
     }
 
     #[test]
+    fn derives_models_endpoint_from_image_endpoint() {
+        assert_eq!(
+            image_endpoint_to_models_endpoint("https://code.3ms.fun/v1/images/generations")
+                .as_deref(),
+            Ok("https://code.3ms.fun/v1/models")
+        );
+    }
+
+    #[test]
+    fn parses_and_filters_image_models() {
+        let body = r#"{"data":[{"id":"gpt-5.2"},{"id":"gpt-image-2"},{"id":"dall-e-3"},{"id":"gpt-image-1.5"}]}"#;
+        let models = parse_model_ids(body).unwrap();
+        assert_eq!(
+            filter_image_model_ids(&models),
+            vec![
+                "dall-e-3".to_string(),
+                "gpt-image-1.5".to_string(),
+                "gpt-image-2".to_string()
+            ]
+        );
+    }
+
+    #[test]
+    fn diagnoses_image_permission_error() {
+        assert_eq!(
+            diagnose_image_generation_error(
+                "OpenAI 返回 HTTP 403: Image generation is not enabled for this group"
+            ),
+            "当前 Key 或中转分组未开通图片生成权限"
+        );
+    }
+
+    #[test]
     fn parses_codex_provider_base_url() {
         let content = r#"
 model_provider = "OpenAI"
@@ -880,6 +1161,34 @@ wire_api = "responses"
             parse_codex_provider_base_url(content, &provider).as_deref(),
             Some("https://code.3ms.fun")
         );
+    }
+
+    #[test]
+    fn explicit_api_key_overrides_codex_default_key() {
+        let suffix = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|duration| duration.as_nanos())
+            .unwrap_or_default();
+        let codex_home = std::env::temp_dir().join(format!("xwm-codex-test-{}", suffix));
+        fs::create_dir_all(&codex_home).unwrap();
+        fs::write(
+            codex_home.join("auth.json"),
+            r#"{"OPENAI_API_KEY":"sk-default-from-codex"}"#,
+        )
+        .unwrap();
+
+        let config = CodexProviderConfig {
+            codex_home: codex_home.clone(),
+            provider: "OpenAI".to_string(),
+            base_url: Some("https://relay.example.com".to_string()),
+        };
+
+        assert_eq!(
+            resolve_api_key(Some(" sk-manual-from-app ".to_string()), Some(&config)).as_deref(),
+            Ok("sk-manual-from-app")
+        );
+
+        let _ = fs::remove_dir_all(codex_home);
     }
 
     #[test]

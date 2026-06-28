@@ -1,4 +1,5 @@
 import type {
+  ImageGenerationTestResult,
   ImageBackground,
   ImageModel,
   ImageOutputFormat,
@@ -38,6 +39,8 @@ interface TextToImageEditorCardProps {
   stylePreset: StylePresetId;
   streaming: boolean;
   generating: boolean;
+  testingConnection: boolean;
+  testResult: ImageGenerationTestResult | null;
   canGenerate: boolean;
   hasCredential: boolean;
   hasEnvKey: boolean;
@@ -61,6 +64,7 @@ interface TextToImageEditorCardProps {
   onStylePresetChange: (value: StylePresetId) => void;
   onStreamingChange: (value: boolean) => void;
   onChooseOutputDir: () => void;
+  onTestConnection: () => void;
   onGenerate: () => void;
 }
 
@@ -79,6 +83,8 @@ export function TextToImageEditorCard({
   stylePreset,
   streaming,
   generating,
+  testingConnection,
+  testResult,
   canGenerate,
   hasCredential,
   hasEnvKey,
@@ -102,6 +108,7 @@ export function TextToImageEditorCard({
   onStylePresetChange,
   onStreamingChange,
   onChooseOutputDir,
+  onTestConnection,
   onGenerate,
 }: TextToImageEditorCardProps) {
   return (
@@ -160,20 +167,31 @@ export function TextToImageEditorCard({
         <div className="space-y-3 rounded-[8px] border border-slate-200 bg-slate-50 p-3">
           <div className="flex items-center justify-between gap-3">
             <label className="text-xs font-semibold text-slate-700">服务配置</label>
-            {providerMode === "codex" && codexProvider && <Badge tone="info">{codexProvider}</Badge>}
+            <div className="flex items-center gap-2">
+              {providerMode === "default" && codexProvider && <Badge tone="info">{codexProvider}</Badge>}
+              <Button
+                variant="secondary"
+                size="sm"
+                onClick={onTestConnection}
+                disabled={testingConnection || !model.trim()}
+              >
+                <Icon name="check" size={14} />
+                {testingConnection ? "测试中" : "测试连接"}
+              </Button>
+            </div>
           </div>
           <div className="grid grid-cols-3 gap-2">
             <button
               type="button"
-              onClick={() => onProviderModeChange("codex")}
+              onClick={() => onProviderModeChange("default")}
               className={cn(
                 "h-10 rounded-[8px] border px-2 text-xs font-medium transition",
-                providerMode === "codex"
+                providerMode === "default"
                   ? "border-blue-200 bg-white text-[var(--brand-700)] ring-1 ring-blue-100"
                   : "border-slate-200 bg-white text-slate-600 hover:bg-slate-100"
               )}
             >
-              Codex 配置
+              默认配置
             </button>
             <button
               type="button"
@@ -204,9 +222,9 @@ export function TextToImageEditorCard({
             <div className="space-y-2">
               <label className="text-[11px] font-medium text-slate-500">Base URL</label>
               <Input
-                value={providerMode === "official" ? officialBaseUrl : providerMode === "codex" ? codexBaseUrl : baseUrl}
+                value={providerMode === "official" ? officialBaseUrl : baseUrl}
                 onChange={(event) => onBaseUrlChange(event.target.value)}
-                disabled={providerMode !== "custom"}
+                disabled={providerMode === "official"}
                 placeholder="https://your-relay.example.com"
               />
             </div>
@@ -217,10 +235,9 @@ export function TextToImageEditorCard({
                 onChange={(event) => onApiKeyChange(event.target.value)}
                 type="password"
                 autoComplete="off"
-                disabled={providerMode === "codex" && hasCodexKey}
                 placeholder={
-                  providerMode === "codex" && hasCodexKey
-                    ? "使用 Codex auth"
+                  providerMode === "default" && hasCodexKey
+                    ? "留空使用默认 Key，可临时覆盖"
                     : hasEnvKey
                       ? "使用 OPENAI_API_KEY"
                       : "本次输入，不保存"
@@ -228,9 +245,41 @@ export function TextToImageEditorCard({
               />
             </div>
           </div>
-          {providerMode === "codex" && (
+          {providerMode === "default" && (
             <div className="truncate text-[11px] text-slate-500">
-              {codexBaseUrl ? `读取 ${codexHome || "Codex"}，调用时会自动补齐 /v1/images/generations` : "未找到可用 Codex 服务地址"}
+              {codexBaseUrl
+                ? `默认读取 ${codexHome || "Codex"}，当前地址和 Key 均可修改，调用时会自动补齐 /v1/images/generations`
+                : "未找到默认服务地址，可直接填写 Base URL 和 API Key"}
+            </div>
+          )}
+          {testResult && (
+            <div
+              className={cn(
+                "rounded-[8px] border px-3 py-2 text-xs",
+                testResult.ok
+                  ? "border-emerald-200 bg-emerald-50 text-emerald-800"
+                  : "border-amber-200 bg-amber-50 text-amber-900"
+              )}
+            >
+              <div className="flex flex-wrap items-center gap-2">
+                <Badge tone={testResult.ok ? "success" : "warning"}>
+                  {testResult.ok ? "自检通过" : "需要处理"}
+                </Badge>
+                <span className="font-medium">{testResult.message}</span>
+                {testResult.elapsed_ms > 0 && (
+                  <span className="text-current/70">{Math.round(testResult.elapsed_ms / 1000)}s</span>
+                )}
+              </div>
+              <div className="mt-1 truncate text-current/70">{testResult.endpoint}</div>
+              {testResult.image_models.length > 0 && (
+                <div className="mt-1 truncate text-current/70">
+                  图片模型 {testResult.image_models.slice(0, 4).join(" / ")}
+                  {testResult.image_models.length > 4 ? ` 等 ${testResult.image_models.length} 个` : ""}
+                </div>
+              )}
+              {testResult.detail && (
+                <div className="mt-1 line-clamp-2 text-current/80">{testResult.detail}</div>
+              )}
             </div>
           )}
         </div>

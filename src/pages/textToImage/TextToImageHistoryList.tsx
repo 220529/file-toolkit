@@ -1,13 +1,15 @@
 import { convertFileSrc } from "@tauri-apps/api/core";
 import { Badge } from "../../components/ui/badge";
 import { cn } from "../../utils/cn";
+import { formatSize } from "../../utils/format";
 import { getBaseName } from "../../utils/path";
-import type { TextToImageHistoryItem } from "./types";
+import { formatCreatedTime } from "./utils";
+import type { TextToImageHistoryEntry } from "./types";
 
 interface TextToImageHistoryListProps {
-  history: TextToImageHistoryItem[];
+  history: TextToImageHistoryEntry[];
   selectedPath?: string;
-  onSelect: (item: TextToImageHistoryItem) => void;
+  onSelect: (item: TextToImageHistoryEntry) => void;
   onClear: () => void;
 }
 
@@ -30,7 +32,7 @@ export function TextToImageHistoryList({
       {history.length === 0 ? (
         <div className="rounded-[8px] border border-dashed border-slate-200 bg-white px-3 py-4 text-center text-xs text-slate-400">暂无记录</div>
       ) : (
-        <div className="grid max-h-[180px] gap-2 overflow-auto pr-1">
+        <div className="grid max-h-[220px] gap-2 overflow-auto pr-1">
           {history.map((item) => (
             <button
               key={item.path}
@@ -45,6 +47,16 @@ export function TextToImageHistoryList({
               <div className="min-w-0">
                 <div className="truncate text-xs font-medium text-slate-800">{getBaseName(item.path)}</div>
                 <div className="mt-0.5 truncate text-[11px] text-slate-400">{item.prompt}</div>
+                <div className="mt-0.5 truncate text-[10px] text-slate-400">
+                  {[
+                    item.size,
+                    item.quality,
+                    formatSize(item.size_bytes),
+                    formatCreatedTime(item.generated_ms || item.created_ms),
+                  ]
+                    .filter(Boolean)
+                    .join(" · ")}
+                </div>
               </div>
               <Badge>{item.mime_type.split("/")[1]?.toUpperCase()}</Badge>
             </button>

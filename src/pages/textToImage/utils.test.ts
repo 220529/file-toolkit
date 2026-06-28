@@ -1,7 +1,15 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { storageKey, stylePresets } from "./options";
+import { historyStorageKey, storageKey, stylePresets } from "./options";
 import type { StylePresetId } from "./types";
-import { buildPrompt, formatCreatedTime, formatImageEndpoint, loadStoredConfig } from "./utils";
+import {
+  buildPrompt,
+  formatCreatedTime,
+  formatImageEndpoint,
+  loadStoredConfig,
+  loadTextToImageHistory,
+  maxStoredTextToImageHistory,
+  persistTextToImageHistory,
+} from "./utils";
 
 const imageEndpointCases: Array<[string, string]> = [
   ["", ""],
@@ -40,16 +48,30 @@ describe("textToImage utils", () => {
     it("returns stored object config", () => {
       stubLocalStorage({
         [storageKey]: JSON.stringify({
-          providerMode: "official",
+          providerMode: "default",
           ratio: "wide",
           streaming: true,
         }),
       });
 
       expect(loadStoredConfig()).toEqual({
-        providerMode: "official",
+        providerMode: "default",
         ratio: "wide",
         streaming: true,
+      });
+    });
+
+    it("migrates the old codex provider mode to default", () => {
+      stubLocalStorage({
+        [storageKey]: JSON.stringify({
+          providerMode: "codex",
+          baseUrl: "https://relay.example.com",
+        }),
+      });
+
+      expect(loadStoredConfig()).toMatchObject({
+        providerMode: "default",
+        baseUrl: "https://relay.example.com",
       });
     });
 
@@ -77,6 +99,46 @@ describe("textToImage utils", () => {
     it("omits empty prompt segments and falls back to the first preset", () => {
       expect(buildPrompt("  A clean app icon  ", "none")).toBe("A clean app icon");
       expect(buildPrompt("  ", "missing" as StylePresetId)).toBe("");
+    });
+  });
+
+  describe("text-to-image history persistence", () => {
+    it("loads valid entries and filters invalid data", () => {
+      stubLocalStorage({
+        [historyStorageKey]: JSON.stringify([
+          {
+            path: "/tmp/a.png",
+            file_name: "a.png",
+            mime_type: "image/png",
+            size_bytes: 123,
+            created_ms: 1000,
+            model: "gpt-image-2",
+            prompt: "blue circle",
+          },
+          { path: "" },
+        ]),
+      });
+
+      expect(loadTextToImageHistory()).toHaveLength(1);
+      expect(loadTextToImageHistory()[0].path).toBe("/tmp/a.png");
+    });
+
+    it("persists at most the configured history size", () => {
+      const storage = stubLocalStorage({});
+      const entries = Array.from({ length: maxStoredTextToImageHistory + 3 }, (_, index) => ({
+        path: `/tmp/${index}.png`,
+        file_name: `${index}.png`,
+        mime_type: "image/png",
+        size_bytes: 123,
+        created_ms: index,
+        model: "gpt-image-2",
+        prompt: `prompt ${index}`,
+      }));
+
+      persistTextToImageHistory(entries);
+
+      const saved = JSON.parse(storage.getItem(historyStorageKey) || "[]");
+      expect(saved).toHaveLength(maxStoredTextToImageHistory);
     });
   });
 

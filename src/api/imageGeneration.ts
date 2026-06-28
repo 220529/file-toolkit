@@ -29,6 +29,27 @@ export interface GenerateImageRequest {
   stream?: boolean;
 }
 
+export interface TestImageGenerationRequest {
+  apiKey?: string;
+  baseUrl?: string;
+  useCodexConfig?: boolean;
+  model?: ImageModel;
+}
+
+export interface ImageGenerationTestResult {
+  ok: boolean;
+  endpoint: string;
+  models_endpoint: string;
+  model: string;
+  has_requested_model: boolean;
+  image_models: string[];
+  models_status?: number | null;
+  generation_status?: number | null;
+  elapsed_ms: number;
+  message: string;
+  detail?: string | null;
+}
+
 export interface GeneratedImage {
   path: string;
   file_name: string;
@@ -45,4 +66,8 @@ export function getImageGenerationConfig() {
 
 export function generateImage(request: GenerateImageRequest) {
   return invoke<GeneratedImage>("generate_image", { request });
+}
+
+export function testImageGeneration(request: TestImageGenerationRequest) {
+  return invoke<ImageGenerationTestResult>("test_image_generation", { request });
 }

@@ -7,7 +7,7 @@ import type {
 
 export type StylePresetId = "none" | "photo" | "illustration" | "product" | "poster" | "icon";
 export type RatioId = "square" | "wide" | "portrait";
-export type ProviderMode = "codex" | "custom" | "official";
+export type ProviderMode = "default" | "custom" | "official";
 
 export interface StoredTextToImageConfig {
   providerMode?: ProviderMode;
@@ -23,3 +23,15 @@ export interface StoredTextToImageConfig {
 }
 
 export type TextToImageHistoryItem = GeneratedImage & { prompt: string };
+
+export interface TextToImageHistoryEntry extends TextToImageHistoryItem {
+  effectivePrompt?: string;
+  providerMode?: ProviderMode;
+  baseUrl?: string;
+  model: string;
+  size?: string;
+  quality?: ImageQuality;
+  background?: ImageBackground;
+  outputFormat?: ImageOutputFormat;
+  generated_ms?: number;
+}

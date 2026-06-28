@@ -5,7 +5,7 @@
 </p>
 
 <p align="center">
-  <b>跨平台文件工具箱</b> —— 文件统计、去重、视频截取、格式转换、去水印
+  <b>跨平台文件工具箱</b> —— 文件统计、文件归类、批量重命名、去重、视频处理、图像工具
 </p>
 
 <p align="center">
@@ -19,10 +19,14 @@
 | 功能 | 说明 |
 |------|------|
 | 📊 文件统计 | 递归扫描，按类型统计数量和大小 |
+| 🗂️ 文件归类 | 手动选择或拖入文件，按日期、类型、扩展名预览后移动归档，提前标记目标冲突，支持撤销最近一次归类 |
+| 📝 批量重命名 | 多文件预览重命名，支持前后缀、查找替换、序号、大小写规则、目标冲突预检和撤销最近一次重命名 |
 | 🔍 文件去重 | xxHash3 快速哈希，并行计算，缩略图预览 |
 | ✂️ 视频截取 | 快速模式（无损）/ 精确模式，时间轴预览 |
 | 🔄 格式转换 | 批量转换 MOV/MP4/GIF，支持画质选择 |
+| 🖼️ 文生图 | 支持 OpenAI 兼容图片生成接口、默认配置读取、连接/权限自检和历史记录 |
 | ✨ 去水印 | 高斯模糊 / 颜色覆盖，支持取色器 |
+| 🧾 运行日志 | 最近日志查看、搜索、模块筛选、错误/警告计数和复制 |
 
 ## 下载
 
@@ -89,6 +93,9 @@ chmod +x src-tauri/binaries/*
 
 # 启动开发
 pnpm tauri dev
+
+# 完整验证
+pnpm run verify
 ```
 
 ### Windows
@@ -119,6 +126,9 @@ pnpm install
 
 # 6. 启动开发
 pnpm tauri dev
+
+# 7. 完整验证
+pnpm run verify
 ```
 
 > ⚠️ 如果 `cargo` 命令找不到，需要将 `%USERPROFILE%\.cargo\bin` 添加到系统 PATH
@@ -136,6 +146,17 @@ pnpm run verify
 # 确保 FFmpeg 已下载到 src-tauri/binaries/
 pnpm tauri build
 ```
+
+## 文生图配置
+
+文生图默认读取本机 Codex 配置作为初始服务地址和 Key 来源：
+
+- 默认配置目录优先级：`CODEX_HOME`、`~/.codex`、`~/.codex-erp`
+- App 内的 Base URL 和 API Key 可以临时覆盖默认配置
+- Base URL 会自动补齐为 `/v1/images/generations`
+- “测试连接”会检查模型列表、所选图片模型和图片生成权限
+
+如果测试返回 `Image generation is not enabled for this group`，说明当前 Key 或中转分组尚未开通图片生成权限。
 
 ## 发布新版本
 

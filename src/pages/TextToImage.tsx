@@ -1,4 +1,9 @@
 import { open } from "@tauri-apps/plugin-dialog";
+import { useState } from "react";
+import {
+  testImageGeneration,
+  type ImageGenerationTestResult,
+} from "../api/tauri";
 import { useFileActions } from "../hooks/useFileActions";
 import { TextToImageEditorCard } from "./textToImage/TextToImageEditorCard";
 import { TextToImageResultCard } from "./textToImage/TextToImageResultCard";
@@ -12,6 +17,8 @@ interface Props {
 export default function TextToImage({ active }: Props) {
   const { openFile, revealInDir } = useFileActions();
   const { generating, lastResult, setLastResult, history, clearHistory, generate } = useTextToImageGeneration();
+  const [testingConnection, setTestingConnection] = useState(false);
+  const [testResult, setTestResult] = useState<ImageGenerationTestResult | null>(null);
   const form = useTextToImageForm(active);
   const {
     prompt,
@@ -64,6 +71,38 @@ export default function TextToImage({ active }: Props) {
     }
   }
 
+  async function testConnection() {
+    if (testingConnection) return;
+    setTestingConnection(true);
+    setTestResult(null);
+    try {
+      const requestBaseUrl =
+        providerMode === "default" || providerMode === "custom"
+          ? baseUrl.trim() || undefined
+          : undefined;
+      const result = await testImageGeneration({
+        apiKey: apiKey.trim() || undefined,
+        baseUrl: requestBaseUrl,
+        useCodexConfig: providerMode === "default",
+        model,
+      });
+      setTestResult(result);
+    } catch (error) {
+      setTestResult({
+        ok: false,
+        endpoint: effectiveBaseUrl,
+        models_endpoint: "",
+        model,
+        has_requested_model: false,
+        image_models: [],
+        elapsed_ms: 0,
+        message: `连接测试失败: ${error}`,
+      });
+    } finally {
+      setTestingConnection(false);
+    }
+  }
+
   return (
     <div className="mx-auto max-w-[1320px] space-y-3">
       <div className="grid min-h-[calc(100vh-150px)] gap-3 lg:grid-cols-[minmax(420px,0.95fr)_minmax(420px,1.05fr)]">
@@ -82,6 +121,8 @@ export default function TextToImage({ active }: Props) {
           stylePreset={stylePreset}
           streaming={streaming}
           generating={generating}
+          testingConnection={testingConnection}
+          testResult={testResult}
           canGenerate={canGenerate}
           hasCredential={hasCredential}
           hasEnvKey={hasEnvKey}
@@ -105,6 +146,7 @@ export default function TextToImage({ active }: Props) {
           onStylePresetChange={setStylePreset}
           onStreamingChange={setStreaming}
           onChooseOutputDir={() => void chooseOutputDir()}
+          onTestConnection={() => void testConnection()}
           onGenerate={() => void generate({
             prompt,
             effectivePrompt,

@@ -12,7 +12,12 @@ import { useTaskReporter } from "../../components/TaskCenter";
 import { useToast } from "../../components/Toast";
 import { createTaskId } from "../../utils/id";
 import { officialBaseUrl } from "./options";
-import type { ProviderMode, TextToImageHistoryItem } from "./types";
+import type { ProviderMode, TextToImageHistoryEntry } from "./types";
+import {
+  loadTextToImageHistory,
+  maxStoredTextToImageHistory,
+  persistTextToImageHistory,
+} from "./utils";
 
 interface GenerateTextToImageInput {
   prompt: string;
@@ -36,7 +41,10 @@ export function useTextToImageGeneration() {
   const { reportTask, clearTask } = useTaskReporter(taskId);
   const [generating, setGenerating] = useState(false);
   const [lastResult, setLastResult] = useState<GeneratedImage | null>(null);
-  const [history, setHistory] = useState<TextToImageHistoryItem[]>([]);
+  const [history, setHistory] = useState<TextToImageHistoryEntry[]>(loadTextToImageHistory);
+  const clearTaskSoon = (delay = 1200) => {
+    window.setTimeout(clearTask, delay);
+  };
 
   async function generate(input: GenerateTextToImageInput) {
     if (!input.prompt.trim()) {
@@ -53,16 +61,14 @@ export function useTextToImageGeneration() {
 
     try {
       const requestBaseUrl =
-        input.providerMode === "custom"
+        input.providerMode === "default" || input.providerMode === "custom"
           ? input.baseUrl.trim() || undefined
-          : input.providerMode === "official"
-            ? officialBaseUrl
-            : undefined;
+          : officialBaseUrl;
       const result = await generateImage({
         prompt: input.effectivePrompt,
-        apiKey: input.providerMode === "codex" ? undefined : input.apiKey.trim() || undefined,
+        apiKey: input.apiKey.trim() || undefined,
         baseUrl: requestBaseUrl,
-        useCodexConfig: input.providerMode === "codex",
+        useCodexConfig: input.providerMode === "default",
         model: input.model,
         size: input.size,
         quality: input.quality,
@@ -72,13 +78,45 @@ export function useTextToImageGeneration() {
         stream: input.streaming,
       });
       setLastResult(result);
-      setHistory((current) => [{ ...result, prompt: input.prompt.trim() }, ...current].slice(0, 8));
+      setHistory((current) => {
+        const next = [
+          {
+            ...result,
+            prompt: input.prompt.trim(),
+            effectivePrompt: input.effectivePrompt,
+            providerMode: input.providerMode,
+            baseUrl: requestBaseUrl || input.effectiveBaseUrl,
+            size: input.size,
+            quality: input.quality,
+            background: input.background,
+            outputFormat: input.outputFormat,
+            generated_ms: Date.now(),
+          },
+          ...current.filter((item) => item.path !== result.path),
+        ].slice(0, maxStoredTextToImageHistory);
+        persistTextToImageHistory(next);
+        return next;
+      });
+      reportTask({
+        title: "文生图",
+        stage: "生成完成",
+        detail: `${result.file_name} · ${input.size}`,
+        progress: 100,
+        status: "success",
+      });
       toast.success("图片已生成");
     } catch (error) {
+      reportTask({
+        title: "文生图",
+        stage: "生成失败",
+        detail: String(error),
+        progress: 100,
+        status: "error",
+      });
       toast.error("生成失败: " + error);
     } finally {
       setGenerating(false);
-      clearTask();
+      clearTaskSoon();
     }
   }
 
@@ -87,7 +125,10 @@ export function useTextToImageGeneration() {
     lastResult,
     setLastResult,
     history,
-    clearHistory: () => setHistory([]),
+    clearHistory: () => {
+      persistTextToImageHistory([]);
+      setHistory([]);
+    },
     generate,
   };
 }
