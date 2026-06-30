@@ -21,11 +21,13 @@ Remote:
 
 ## Decision
 
-Keep indexed but not adopted. Promote to product asset only after generated-output cleanup review and release boundary documentation.
+Keep indexed but not adopted. README/AGENTS now document release, FFmpeg binary, Codex key, generated-output, and local data boundaries. Promote to product asset only after generated-output cleanup review, release ownership, signing/notarization, FFmpeg redistribution, and user-file privacy boundaries are accepted.
+
+Project-level `.npmrc` points npm cache, pnpm store, and pnpm state to `/private/tmp` and disables pnpm self-managed version switching so dependency caches and pnpm tools do not become workspace assets or write into the user home directory.
 
 ## Next Actions
 
 1. Use `env CARGO_TARGET_DIR=/private/tmp/file-toolkit-cargo-target pnpm run verify` after migration.
 2. Confirm generated directories are ignored and not required as source.
-3. Add release boundary and local data policy.
+3. Decide FFmpeg binary source, license/redistribution policy, signing/notarization, release ownership, and rollback workflow.
 4. Update catalog to `adopted` only after checks pass and the stale local `src-tauri/target/` policy is decided.

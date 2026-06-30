@@ -147,6 +147,8 @@ pnpm run verify
 pnpm tauri build
 ```
 
+> 打包会读取本机 Tauri/Rust 环境和 `src-tauri/binaries/` 下的 FFmpeg 二进制。Agent 不得自动下载 FFmpeg、签名、notarize、上传安装包或执行发布流程，除非用户明确确认。
+
 ## 文生图配置
 
 文生图默认读取本机 Codex 配置作为初始服务地址和 Key 来源：
@@ -163,6 +165,16 @@ pnpm tauri build
 ```bash
 ./tag.sh  # 选择版本号，自动推送 tag，GitHub Actions 自动打包发布
 ```
+
+`tag.sh` 会创建/删除 tag、push 远程并触发 GitHub Actions。Agent 不得自动执行该脚本、创建 release、上传安装包、签名或更改远程仓库。
+
+## 工作区状态与边界
+
+- catalog 状态：`indexed` product candidate，尚未 adopted。
+- 项目级 `.npmrc` 将 npm cache、pnpm store 和 pnpm state 指向 `/private/tmp`，并关闭 pnpm 自管理版本切换。
+- 文生图功能可以读取本机 Codex 配置来判断默认 Base URL 和 Key 来源，但不得把真实 API key、Codex 配置内容、生成历史或本地路径写入 README、日志、catalog 或测试快照。
+- `node_modules/`、`dist/`、`tmp/`、`src-tauri/target/`、`src-tauri/binaries/`、安装包、本地生成图片和 `.DS_Store` 都是生成物或运行态文件，不进入资产索引。
+- 发布前仍需确认 FFmpeg 二进制来源、许可证/再分发边界、macOS 签名/notarization、Windows 安装包签名、更新/回滚策略和用户文件隐私边界。
 
 ## License
 
