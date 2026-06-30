@@ -25,7 +25,7 @@ Keep indexed but not adopted. Promote to product asset only after generated-outp
 
 ## Next Actions
 
-1. Verify `pnpm run verify` in the local environment.
+1. Use `env CARGO_TARGET_DIR=/private/tmp/file-toolkit-cargo-target pnpm run verify` after migration.
 2. Confirm generated directories are ignored and not required as source.
 3. Add release boundary and local data policy.
-4. Update catalog to `adopted` only after checks pass.
+4. Update catalog to `adopted` only after checks pass and the stale local `src-tauri/target/` policy is decided.

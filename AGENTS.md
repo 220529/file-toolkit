@@ -17,8 +17,10 @@
 ## Verification
 
 ```sh
-pnpm run verify
+env CARGO_TARGET_DIR=/private/tmp/file-toolkit-cargo-target pnpm run verify
 python3 /Users/kaixin/ai/catalog/scripts/check_catalog.py
 ```
+
+Use an isolated `CARGO_TARGET_DIR` after moving this repository between paths. The local `src-tauri/target/` directory can contain stale generated Tauri permission paths from the previous checkout location.
 
 如果本机依赖或 Rust/Tauri 环境不完整，至少运行能覆盖本次改动的最小命令并说明缺口。
