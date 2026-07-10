@@ -13,7 +13,15 @@ import { useWindowDrop } from "../hooks/useWindowDrop";
 import { cn } from "../utils/cn";
 import { createId } from "../utils/id";
 import { safeListen } from "../utils/tauriEvent";
-import { getBaseName, getDirName, getExtension, getPathSeparator, joinPath, stripExtension } from "../utils/path";
+import {
+  fileSystemCollisionKey,
+  getBaseName,
+  getDirName,
+  getExtension,
+  getPathSeparator,
+  joinPath,
+  stripExtension,
+} from "../utils/path";
 
 interface Props {
   active: boolean;
@@ -73,8 +81,13 @@ export default function VideoConvert({ active }: Props) {
   const [targetFormat, setTargetFormat] = useState<Format>("mp4");
   const [quality, setQuality] = useState<Quality>("medium");
   const [converting, setConverting] = useState(false);
+  const [cancelling, setCancelling] = useState(false);
+  const [addingFiles, setAddingFiles] = useState(false);
   const [currentIndex, setCurrentIndex] = useState(-1);
   const cancelRequestedRef = useRef(false);
+  const currentTaskIdRef = useRef<string | null>(null);
+  const currentFileIdRef = useRef<string | null>(null);
+  const addingFilesRef = useRef(false);
   const toast = useToast();
   const task = useTaskReporter("video-convert");
   const fileActions = useFileActions();
@@ -83,52 +96,78 @@ export default function VideoConvert({ active }: Props) {
     if (!active) return;
 
     return safeListen("convert-progress", (event) => {
-      if (currentIndex >= 0) {
+      const currentFileId = currentFileIdRef.current;
+      if (event.payload.task_id === currentTaskIdRef.current && currentFileId) {
         setFiles((prev) =>
-          prev.map((file, index) => (index === currentIndex ? { ...file, progress: Math.round(event.payload) } : file))
+          prev.map((file) =>
+            file.id === currentFileId ? { ...file, progress: Math.round(event.payload.percent) } : file
+          )
         );
       }
     });
-  }, [active, currentIndex]);
+  }, [active]);
 
   const { dragging } = useWindowDrop({
-    active,
+    active: active && !converting && !addingFiles,
     onDrop: (paths) => {
       void addFiles(paths);
     },
   });
 
   async function addFiles(paths: string[]) {
+    if (converting || addingFilesRef.current || paths.length === 0) return;
+    addingFilesRef.current = true;
+    setAddingFiles(true);
     const videoExts = ["mov", "mp4", "avi", "mkv", "webm", "flv", "wmv"];
-    const newPaths = paths.filter((path) => {
+    const uniquePaths = Array.from(
+      new Map(paths.map((path) => [fileSystemCollisionKey(path), path])).values()
+    );
+    const existingPaths = new Set(files.map((file) => fileSystemCollisionKey(file.path)));
+    const newPaths = uniquePaths.filter((path) => {
       const ext = getExtension(path).toLowerCase();
-      return videoExts.includes(ext) && !files.some((file) => file.path === path);
+      return videoExts.includes(ext) && !existingPaths.has(fileSystemCollisionKey(path));
     });
 
-    const newFiles: FileItem[] = [];
-    for (const path of newPaths) {
-      try {
-        const size = await getFileSize(path);
-        newFiles.push({
-          id: createId("video-convert"),
-          path,
-          name: getBaseName(path),
-          sourceFormat: getExtension(path).toLowerCase(),
-          size,
-          status: "pending",
-          progress: 0,
-        });
-      } catch {
-        // ignore unreadable files
+    try {
+      const newFiles: FileItem[] = [];
+      let unreadableCount = 0;
+      for (const path of newPaths) {
+        try {
+          const size = await getFileSize(path);
+          newFiles.push({
+            id: createId("video-convert"),
+            path,
+            name: getBaseName(path),
+            sourceFormat: getExtension(path).toLowerCase(),
+            size,
+            status: "pending",
+            progress: 0,
+          });
+        } catch {
+          unreadableCount += 1;
+        }
       }
-    }
 
-    if (newFiles.length > 0) {
-      setFiles((prev) => [...prev, ...newFiles]);
+      if (newFiles.length > 0) {
+        setFiles((current) => {
+          const existing = new Set(current.map((file) => file.path));
+          return [...current, ...newFiles.filter((file) => !existing.has(file.path))];
+        });
+        toast.success(`已添加 ${newFiles.length} 个视频`);
+      }
+
+      const skippedCount = uniquePaths.length - newPaths.length + unreadableCount;
+      if (skippedCount > 0) {
+        toast.warning(`已跳过 ${skippedCount} 个重复、不支持或不可读取的文件`);
+      }
+    } finally {
+      addingFilesRef.current = false;
+      setAddingFiles(false);
     }
   }
 
   async function handleSelectFiles() {
+    if (converting || addingFilesRef.current) return;
     const selected = await open({
       title: "选择视频文件",
       multiple: true,
@@ -145,95 +184,128 @@ export default function VideoConvert({ active }: Props) {
 
   async function startConvert() {
     const pendingFiles = files.filter((file) => file.status === "pending");
-    if (pendingFiles.length === 0) return;
+    if (pendingFiles.length === 0 || converting || addingFilesRef.current) return;
 
+    currentTaskIdRef.current = null;
+    currentFileIdRef.current = null;
     setConverting(true);
+    setCancelling(false);
     cancelRequestedRef.current = false;
     let successCount = 0;
     let failedCount = 0;
     let wasCancelled = false;
 
-    for (let index = 0; index < files.length; index++) {
-      if (cancelRequestedRef.current) {
-        wasCancelled = true;
-        break;
-      }
-      if (files[index].status !== "pending") continue;
-
-      setCurrentIndex(index);
-      setFiles((prev) =>
-        prev.map((file, current) =>
-          current === index ? { ...file, status: "converting", progress: 0, startTime: Date.now() } : file
-        )
-      );
-
-      const file = files[index];
-      const outputPath = joinPath(
-        getDirName(file.path),
-        `${stripExtension(file.name)}_converted.${targetFormat}`,
-        getPathSeparator(file.path)
-      );
-
-      try {
-        await convertVideo({
-          input: file.path,
-          output: outputPath,
-          format: targetFormat,
-          quality,
-        });
-
-        let outputSize = 0;
-        try {
-          outputSize = await getFileSize(outputPath);
-        } catch {
-          // ignore
-        }
-
-        setFiles((prev) =>
-          prev.map((item, current) => {
-            if (current !== index) return item;
-            const duration = item.startTime ? Math.round((Date.now() - item.startTime) / 1000) : 0;
-            return { ...item, status: "done", progress: 100, outputPath, outputSize, duration };
-          })
-        );
-        successCount += 1;
-      } catch (e) {
-        const message = String(e);
-        setFiles((prev) =>
-          prev.map((item, current) => {
-            if (current !== index) return item;
-            const duration = item.startTime ? Math.round((Date.now() - item.startTime) / 1000) : 0;
-            return { ...item, status: "error", error: message, duration };
-          })
-        );
-        if (message.includes("取消")) {
+    try {
+      for (let index = 0; index < files.length; index++) {
+        if (cancelRequestedRef.current) {
           wasCancelled = true;
           break;
         }
-        failedCount += 1;
+        if (files[index].status !== "pending") continue;
+
+        setCurrentIndex(index);
+        setFiles((prev) =>
+          prev.map((file, current) =>
+            current === index
+              ? { ...file, status: "converting", progress: 0, error: undefined, startTime: Date.now() }
+              : file
+          )
+        );
+
+        const file = files[index];
+        const commandTaskId = createId("video-convert-file");
+        currentTaskIdRef.current = commandTaskId;
+        currentFileIdRef.current = file.id;
+        const requestedOutputPath = joinPath(
+          getDirName(file.path),
+          `${stripExtension(file.name)}_converted.${targetFormat}`,
+          getPathSeparator(file.path)
+        );
+
+        try {
+          const outputPath = await convertVideo({
+            taskId: commandTaskId,
+            input: file.path,
+            output: requestedOutputPath,
+            format: targetFormat,
+            quality,
+          });
+
+          let outputSize = 0;
+          try {
+            outputSize = await getFileSize(outputPath);
+          } catch {
+            // The output remains usable even if size metadata is unavailable.
+          }
+
+          setFiles((prev) =>
+            prev.map((item, current) => {
+              if (current !== index) return item;
+              const duration = item.startTime ? Math.round((Date.now() - item.startTime) / 1000) : 0;
+              return { ...item, status: "done", progress: 100, outputPath, outputSize, duration };
+            })
+          );
+          successCount += 1;
+        } catch (e) {
+          const message = String(e);
+          if (message.includes("取消")) {
+            setFiles((prev) =>
+              prev.map((item, current) =>
+                current === index
+                  ? { ...item, status: "pending", progress: 0, error: undefined, startTime: undefined }
+                  : item
+              )
+            );
+            wasCancelled = true;
+            break;
+          }
+          setFiles((prev) =>
+            prev.map((item, current) => {
+              if (current !== index) return item;
+              const duration = item.startTime ? Math.round((Date.now() - item.startTime) / 1000) : 0;
+              return { ...item, status: "error", error: message, duration };
+            })
+          );
+          failedCount += 1;
+        } finally {
+          if (currentTaskIdRef.current === commandTaskId) {
+            currentTaskIdRef.current = null;
+            currentFileIdRef.current = null;
+          }
+        }
       }
-    }
 
-    setConverting(false);
-    setCurrentIndex(-1);
-    cancelRequestedRef.current = false;
-
-    if (wasCancelled) {
-      toast.info("已取消转换");
-      return;
-    }
-
-    if (successCount > 0 && failedCount === 0) {
-      toast.success(`转换完成：${successCount} 个文件`);
-    } else if (successCount > 0 || failedCount > 0) {
-      toast.warning(`转换结束：${successCount} 个成功，${failedCount} 个失败`);
+      if (wasCancelled) {
+        toast.info("已取消转换，未完成项目仍保留在队列中");
+      } else if (successCount > 0 && failedCount === 0) {
+        toast.success(`转换完成：${successCount} 个文件`);
+      } else if (successCount > 0 || failedCount > 0) {
+        toast.warning(`转换结束：${successCount} 个成功，${failedCount} 个失败`);
+      }
+    } finally {
+      setConverting(false);
+      setCancelling(false);
+      setCurrentIndex(-1);
+      cancelRequestedRef.current = false;
+      currentTaskIdRef.current = null;
+      currentFileIdRef.current = null;
     }
   }
 
-  function handleCancel() {
+  async function handleCancel() {
+    const taskId = currentTaskIdRef.current;
+    if (!converting || cancelling) return;
     cancelRequestedRef.current = true;
-    void cancelConvert();
-    setConverting(false);
+    setCancelling(true);
+    try {
+      if (taskId) {
+        await cancelConvert(taskId);
+      }
+    } catch (error) {
+      cancelRequestedRef.current = false;
+      setCancelling(false);
+      toast.error("取消失败: " + error);
+    }
   }
 
   const doneCount = files.filter((file) => file.status === "done").length;
@@ -252,21 +324,27 @@ export default function VideoConvert({ active }: Props) {
 
     task.reportTask({
       title: "格式转换",
-      stage: `已完成 ${completedCount} / ${totalCount}`,
+      stage: cancelling ? "正在取消当前文件" : `已完成 ${completedCount} / ${totalCount}`,
       detail: currentIndex >= 0 && files[currentIndex] ? files[currentIndex].name : "准备转换",
       progress: ((completedCount + currentProgress / 100) / totalCount) * 100,
-      cancellable: true,
+      cancellable: !cancelling,
       onCancel: handleCancel,
     });
-  }, [converting, files, currentIndex]);
+  }, [cancelling, converting, files, currentIndex]);
 
   return (
     <div className="mx-auto max-w-[1360px] space-y-4">
       <Card className="overflow-hidden">
         <CardContent className="px-5 py-5">
-          <div
-            onClick={handleSelectFiles}
-            className={cn("drop-zone flex flex-col items-center justify-center", dragging && active && "dragging")}
+          <button
+            type="button"
+            disabled={converting || addingFiles}
+            onClick={() => void handleSelectFiles()}
+            className={cn(
+              "drop-zone flex w-full flex-col items-center justify-center disabled:cursor-not-allowed",
+              dragging && active && "dragging",
+              (converting || addingFiles) && "cursor-not-allowed opacity-70"
+            )}
           >
             <div className="mb-4 flex h-12 w-12 items-center justify-center rounded-[8px] border border-slate-200 bg-slate-50 text-[var(--brand-700)]">
               <Icon
@@ -276,14 +354,22 @@ export default function VideoConvert({ active }: Props) {
               />
             </div>
             <div className="text-lg font-semibold text-slate-900">
-              {converting ? "转换任务进行中" : dragging ? "松开以添加视频文件" : "拖入视频，或点击选择"}
+              {cancelling
+                ? "正在取消转换"
+                : converting
+                  ? "转换任务进行中"
+                  : addingFiles
+                    ? "正在读取视频信息"
+                    : dragging
+                      ? "松开以添加视频文件"
+                      : "拖入视频，或点击选择"}
             </div>
             <div className="mt-5">
-              <Button variant="secondary" size="sm">
-                {converting ? "处理中…" : "添加视频"}
-              </Button>
+              <span className="inline-flex h-8 items-center rounded-[8px] border border-slate-200 bg-white px-3 text-xs font-medium text-slate-700 shadow-sm">
+                {converting ? "处理中…" : addingFiles ? "读取中…" : "添加视频"}
+              </span>
             </div>
-          </div>
+          </button>
           {files.length > 0 && (
             <div className="mt-4 flex flex-wrap items-center gap-3 rounded-[10px] border border-slate-200 bg-slate-50 px-4 py-3">
               <Badge tone="info">任务队列</Badge>
@@ -310,7 +396,7 @@ export default function VideoConvert({ active }: Props) {
                   <CardTitle>转换队列</CardTitle>
                 </div>
                 {!converting && (
-                  <Button variant="secondary" size="sm" onClick={handleSelectFiles}>
+                  <Button variant="secondary" size="sm" onClick={() => void handleSelectFiles()} disabled={addingFiles}>
                     继续添加
                   </Button>
                 )}
@@ -436,16 +522,21 @@ export default function VideoConvert({ active }: Props) {
                 <div className="space-y-3 border-t border-slate-100 pt-4">
                   {!converting ? (
                     <>
-                      <Button variant="primary" className="w-full" onClick={startConvert} disabled={pendingCount === 0}>
+                      <Button
+                        variant="primary"
+                        className="w-full"
+                        onClick={startConvert}
+                        disabled={pendingCount === 0 || addingFiles}
+                      >
                         开始转换{pendingCount > 0 ? ` (${pendingCount})` : ""}
                       </Button>
-                      <Button variant="secondary" className="w-full" onClick={() => setFiles([])}>
+                      <Button variant="secondary" className="w-full" onClick={() => setFiles([])} disabled={addingFiles}>
                         清空队列
                       </Button>
                     </>
                   ) : (
-                    <Button variant="danger" className="w-full" onClick={handleCancel}>
-                      取消当前批次
+                    <Button variant="danger" className="w-full" onClick={() => void handleCancel()} disabled={cancelling}>
+                      {cancelling ? "取消中…" : "取消当前批次"}
                     </Button>
                   )}
                 </div>

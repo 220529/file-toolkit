@@ -1,4 +1,4 @@
-import { createContext, useCallback, useContext, useEffect, useMemo, useState } from "react";
+import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState } from "react";
 
 interface TaskItem {
   id: string;
@@ -40,7 +40,10 @@ export function TaskCenterProvider({ children }: { children: React.ReactNode }) 
         [task.id]: {
           ...task,
           progress: nextProgress,
-          startedAt: task.startedAt ?? previous?.startedAt ?? Date.now(),
+          startedAt:
+            task.startedAt ??
+            (previous?.status === "running" ? previous.startedAt : undefined) ??
+            Date.now(),
           status: task.status ?? "running",
         },
       };
@@ -72,15 +75,37 @@ export function useTaskCenter() {
 
 export function useTaskReporter(taskId: string) {
   const { upsertTask, clearTask } = useTaskCenter();
+  const clearTimerRef = useRef<number | null>(null);
+
+  const cancelScheduledClear = useCallback(() => {
+    if (clearTimerRef.current == null) return;
+    window.clearTimeout(clearTimerRef.current);
+    clearTimerRef.current = null;
+  }, []);
 
   const reportTask = useCallback(
-    (task: Omit<TaskItem, "id">) => upsertTask({ id: taskId, ...task }),
-    [taskId, upsertTask]
+    (task: Omit<TaskItem, "id">) => {
+      cancelScheduledClear();
+      upsertTask({ id: taskId, ...task });
+    },
+    [cancelScheduledClear, taskId, upsertTask]
   );
 
   const clearCurrentTask = useCallback(() => {
+    cancelScheduledClear();
     clearTask(taskId);
-  }, [taskId, clearTask]);
+  }, [cancelScheduledClear, taskId, clearTask]);
+
+  const scheduleClearTask = useCallback(
+    (delayMs: number) => {
+      cancelScheduledClear();
+      clearTimerRef.current = window.setTimeout(() => {
+        clearTimerRef.current = null;
+        clearTask(taskId);
+      }, delayMs);
+    },
+    [cancelScheduledClear, clearTask, taskId]
+  );
 
   useEffect(() => {
     return clearCurrentTask;
@@ -90,8 +115,9 @@ export function useTaskReporter(taskId: string) {
     () => ({
       reportTask,
       clearTask: clearCurrentTask,
+      scheduleClearTask,
     }),
-    [reportTask, clearCurrentTask]
+    [reportTask, clearCurrentTask, scheduleClearTask]
   );
 }
 

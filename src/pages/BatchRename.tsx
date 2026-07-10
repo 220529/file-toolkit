@@ -53,12 +53,13 @@ export default function BatchRename({ active = true }: Props) {
   const [undoState, setUndoState] = useState<RenameUndoState | null>(null);
   const [existingTargetPaths, setExistingTargetPaths] = useState<Set<string>>(() => new Set());
   const [checkingTargets, setCheckingTargets] = useState(false);
+  const [targetCheckError, setTargetCheckError] = useState<string | null>(null);
   const [confirmOpen, setConfirmOpen] = useState(false);
   const toast = useToast();
   const task = useTaskReporter("batch-rename");
   const busy = renaming || undoing;
   const { dragging } = useWindowDrop({
-    active,
+    active: active && !busy,
     onDrop: (nextPaths) => {
       if (busy) return;
       addPaths(nextPaths);
@@ -74,30 +75,31 @@ export default function BatchRename({ active = true }: Props) {
   );
   const readyItems = previewItems.filter((item) => item.status === "ready");
   const blocked = hasBlockingPreviewIssue(previewItems);
-  const canRename = readyItems.length > 0 && !blocked && !busy && !checkingTargets;
+  const canRename = readyItems.length > 0 && !blocked && !busy && !checkingTargets && !targetCheckError;
   const canUndo = Boolean(undoState && undoState.count > 0 && !busy);
 
   useEffect(() => {
     if (targetPathsToCheck.length === 0) {
       setExistingTargetPaths((current) => (current.size === 0 ? current : new Set()));
+      setTargetCheckError(null);
       setCheckingTargets(false);
       return;
     }
 
     let cancelled = false;
     setCheckingTargets(true);
+    setTargetCheckError(null);
     void Promise.all(
-      targetPathsToCheck.map(async (path) => {
-        try {
-          return [path, await pathExists(path)] as const;
-        } catch {
-          return [path, false] as const;
-        }
-      })
+      targetPathsToCheck.map(async (path) => [path, await pathExists(path)] as const)
     )
       .then((results) => {
         if (cancelled) return;
         setExistingTargetPaths(new Set(results.filter(([, exists]) => exists).map(([path]) => path)));
+      })
+      .catch((error) => {
+        if (cancelled) return;
+        setExistingTargetPaths(new Set());
+        setTargetCheckError(`无法确认目标路径: ${String(error)}`);
       })
       .finally(() => {
         if (!cancelled) setCheckingTargets(false);
@@ -159,7 +161,11 @@ export default function BatchRename({ active = true }: Props) {
       const renamedMap = new Map(successfulItems.map((item) => [item.from, item.to]));
       setPaths((current) => current.map((path) => renamedMap.get(path) || path));
       setUndoState(buildRenameUndoState(successfulItems));
-      toast.success(`已重命名 ${result.renamed} 个文件`);
+      if (result.failed > 0) {
+        toast.warning(`已重命名 ${result.renamed} 个文件，${result.failed} 个失败`);
+      } else {
+        toast.success(`已重命名 ${result.renamed} 个文件`);
+      }
       task.reportTask({
         title: "批量重命名",
         stage: "重命名完成",
@@ -167,7 +173,7 @@ export default function BatchRename({ active = true }: Props) {
         progress: 100,
         status: result.failed > 0 ? "error" : "success",
       });
-      window.setTimeout(task.clearTask, 1200);
+      task.scheduleClearTask(1200);
     } catch (error) {
       toast.error("重命名失败: " + error);
       task.reportTask({
@@ -177,7 +183,7 @@ export default function BatchRename({ active = true }: Props) {
         progress: 100,
         status: "error",
       });
-      window.setTimeout(task.clearTask, 1600);
+      task.scheduleClearTask(1600);
     } finally {
       setRenaming(false);
     }
@@ -210,7 +216,7 @@ export default function BatchRename({ active = true }: Props) {
         progress: 100,
         status: result.failed > 0 ? "error" : "success",
       });
-      window.setTimeout(task.clearTask, result.failed > 0 ? 1600 : 1200);
+      task.scheduleClearTask(result.failed > 0 ? 1600 : 1200);
     } catch (error) {
       toast.error("撤销失败: " + error);
       task.reportTask({
@@ -220,7 +226,7 @@ export default function BatchRename({ active = true }: Props) {
         progress: 100,
         status: "error",
       });
-      window.setTimeout(task.clearTask, 1600);
+      task.scheduleClearTask(1600);
     } finally {
       setUndoing(false);
     }
@@ -246,10 +252,12 @@ export default function BatchRename({ active = true }: Props) {
             </Button>
           </CardHeader>
           <CardContent className="space-y-4">
-            <div
+            <button
+              type="button"
               onClick={() => void chooseFiles()}
+              disabled={busy}
               className={cn(
-                "flex min-h-[128px] cursor-pointer flex-col items-center justify-center rounded-[8px] border border-dashed border-slate-300 bg-slate-50 px-4 py-5 text-center transition",
+                "flex min-h-[128px] w-full cursor-pointer flex-col items-center justify-center rounded-[8px] border border-dashed border-slate-300 bg-slate-50 px-4 py-5 text-center transition disabled:cursor-not-allowed disabled:opacity-60",
                 dragging && active && "border-blue-300 bg-blue-50"
               )}
             >
@@ -258,14 +266,14 @@ export default function BatchRename({ active = true }: Props) {
                 {dragging ? "松开以添加文件" : "拖入文件，或点击选择"}
               </div>
               <div className="mt-1 text-xs text-slate-500">已选择 {paths.length} 个文件</div>
-            </div>
+            </button>
 
             <RuleSection title="基础规则">
-              <LabeledInput label="前缀" value={rule.prefix} onChange={(value) => updateRule({ prefix: value })} />
-              <LabeledInput label="后缀" value={rule.suffix} onChange={(value) => updateRule({ suffix: value })} />
+              <LabeledInput label="前缀" value={rule.prefix} onChange={(value) => updateRule({ prefix: value })} disabled={busy} />
+              <LabeledInput label="后缀" value={rule.suffix} onChange={(value) => updateRule({ suffix: value })} disabled={busy} />
               <div className="grid grid-cols-2 gap-2">
-                <LabeledInput label="查找" value={rule.find} onChange={(value) => updateRule({ find: value })} />
-                <LabeledInput label="替换为" value={rule.replace} onChange={(value) => updateRule({ replace: value })} />
+                <LabeledInput label="查找" value={rule.find} onChange={(value) => updateRule({ find: value })} disabled={busy} />
+                <LabeledInput label="替换为" value={rule.replace} onChange={(value) => updateRule({ replace: value })} disabled={busy} />
               </div>
             </RuleSection>
 
@@ -273,6 +281,7 @@ export default function BatchRename({ active = true }: Props) {
               <label className="flex items-center gap-2 text-xs font-medium text-slate-700">
                 <Checkbox
                   checked={rule.numbering}
+                  disabled={busy}
                   onCheckedChange={(value) => updateRule({ numbering: value === true })}
                 />
                 追加递增序号
@@ -283,12 +292,14 @@ export default function BatchRename({ active = true }: Props) {
                   type="number"
                   value={String(rule.startNumber)}
                   onChange={(value) => updateRule({ startNumber: Number(value) || 0 })}
+                  disabled={busy}
                 />
                 <LabeledInput
                   label="位数"
                   type="number"
                   value={String(rule.padding)}
                   onChange={(value) => updateRule({ padding: Number(value) || 1 })}
+                  disabled={busy}
                 />
               </div>
             </RuleSection>
@@ -299,17 +310,19 @@ export default function BatchRename({ active = true }: Props) {
                 value={rule.nameCase}
                 options={nameCaseOptions}
                 onChange={(value) => updateRule({ nameCase: value })}
+                disabled={busy}
               />
               <SegmentedControl
                 label="扩展名"
                 value={rule.extensionCase}
                 options={extensionCaseOptions}
                 onChange={(value) => updateRule({ extensionCase: value })}
+                disabled={busy}
               />
             </RuleSection>
 
             <div className="flex gap-2">
-              <Button variant="secondary" className="flex-1" onClick={() => updateRule(defaultRenameRule)}>
+              <Button variant="secondary" className="flex-1" onClick={() => updateRule(defaultRenameRule)} disabled={busy}>
                 重置规则
               </Button>
               <Button
@@ -334,7 +347,9 @@ export default function BatchRename({ active = true }: Props) {
               <CardDescription className="mt-1">
                 {readyItems.length} 个可执行，{previewItems.length - readyItems.length} 个需要处理
                 {checkingTargets ? "，正在检查目标路径" : ""}
+                {targetCheckError ? "，目标路径检查失败" : ""}
               </CardDescription>
+              {targetCheckError && <div className="mt-1 text-xs text-rose-600">{targetCheckError}</div>}
             </div>
             <div className="flex items-center gap-2">
               {lastResult && (
@@ -473,16 +488,18 @@ function LabeledInput({
   value,
   onChange,
   type = "text",
+  disabled,
 }: {
   label: string;
   value: string;
   onChange: (value: string) => void;
   type?: string;
+  disabled?: boolean;
 }) {
   return (
     <div className="space-y-1.5">
       <label className="text-[11px] font-medium text-slate-500">{label}</label>
-      <Input value={value} type={type} onChange={(event) => onChange(event.target.value)} />
+      <Input value={value} type={type} onChange={(event) => onChange(event.target.value)} disabled={disabled} />
     </div>
   );
 }
@@ -492,11 +509,13 @@ function SegmentedControl<T extends string>({
   value,
   options,
   onChange,
+  disabled,
 }: {
   label: string;
   value: T;
   options: Array<{ value: T; label: string }>;
   onChange: (value: T) => void;
+  disabled?: boolean;
 }) {
   const gridColumns = options.length === 4 ? "grid-cols-4" : "grid-cols-3";
 
@@ -508,9 +527,11 @@ function SegmentedControl<T extends string>({
           <button
             key={item.value}
             type="button"
+            disabled={disabled}
             onClick={() => onChange(item.value)}
             className={cn(
               "h-8 rounded-[6px] text-xs font-medium transition",
+              disabled && "cursor-not-allowed opacity-60",
               value === item.value ? "bg-slate-900 text-white" : "text-slate-500 hover:bg-slate-50 hover:text-slate-900"
             )}
           >

@@ -1,4 +1,4 @@
-import { getBaseName, getExtension, getPathSeparator, joinPath } from "../../utils/path";
+import { fileSystemCollisionKey, getBaseName, getExtension, getPathSeparator, joinPath } from "../../utils/path";
 import type {
   DateGranularity,
   OrganizeFile,
@@ -32,27 +32,32 @@ export function buildOrganizePreview(
     }));
   }
 
-  const sourcePaths = new Set(files.map((file) => file.path));
+  const sourcePaths = new Set(files.map((file) => fileSystemCollisionKey(file.path)));
   const rawItems = files.map((file) => buildPreviewItem(file, rule));
   const targetCounts = rawItems.reduce<Record<string, number>>((acc, item) => {
-    acc[item.targetPath] = (acc[item.targetPath] || 0) + 1;
+    const key = fileSystemCollisionKey(item.targetPath);
+    acc[key] = (acc[key] || 0) + 1;
     return acc;
   }, {});
+  const existingTargetPaths = new Set(
+    Array.from(options.existingTargetPaths ?? []).map(fileSystemCollisionKey)
+  );
 
   return rawItems.map((item) => {
+    const targetKey = fileSystemCollisionKey(item.targetPath);
     if (!item.fileName.trim()) {
       return { ...item, status: "invalid", reason: "文件名为空" };
     }
     if (!item.targetFolder.trim()) {
       return { ...item, status: "invalid", reason: "目标分类为空" };
     }
-    if (targetCounts[item.targetPath] > 1) {
+    if (targetCounts[targetKey] > 1) {
       return { ...item, status: "duplicate", reason: "目标路径重复" };
     }
-    if (sourcePaths.has(item.targetPath)) {
+    if (sourcePaths.has(targetKey)) {
       return { ...item, status: "duplicate", reason: "目标与待归类源文件冲突" };
     }
-    if (options.existingTargetPaths?.has(item.targetPath)) {
+    if (existingTargetPaths.has(targetKey)) {
       return { ...item, status: "exists", reason: "目标文件已存在" };
     }
     if (item.targetPath === item.path) {
@@ -129,11 +134,16 @@ function sanitizeFolderName(value: string) {
 }
 
 export function collectOrganizeTargetPaths(items: OrganizePreviewItem[]) {
-  const sourcePaths = new Set(items.map((item) => item.path));
+  const sourcePaths = new Set(items.map((item) => fileSystemCollisionKey(item.path)));
   return Array.from(
     new Set(
       items
-        .filter((item) => item.status === "ready" && item.targetPath && !sourcePaths.has(item.targetPath))
+        .filter(
+          (item) =>
+            item.status === "ready" &&
+            item.targetPath &&
+            !sourcePaths.has(fileSystemCollisionKey(item.targetPath))
+        )
         .map((item) => item.targetPath)
     )
   );

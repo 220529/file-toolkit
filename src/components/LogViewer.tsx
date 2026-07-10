@@ -93,7 +93,7 @@ export default function LogViewer({ onClose }: Props) {
             <Input
               value={query}
               onChange={(event) => setQuery(event.target.value)}
-                placeholder="搜索日志内容、路径或任务 ID"
+                placeholder="搜索模块、状态或任务 ID"
             />
             </div>
             <div className="shrink-0 text-xs text-[var(--text-muted)]">
@@ -105,7 +105,7 @@ export default function LogViewer({ onClose }: Props) {
           <pre className="whitespace-pre-wrap break-words font-mono text-[12px] leading-6 text-slate-200">{visibleLogs}</pre>
         </div>
         <div className="flex items-center justify-between border-t border-[var(--stroke)] bg-[#f7f8f5] px-5 py-3">
-          <div className="text-xs text-[var(--text-muted)]">日志文件默认保留 7 天。</div>
+          <div className="text-xs text-[var(--text-muted)]">日志默认保留 7 天，单日最多 5 MB，不记录文件路径。</div>
           <Button variant="primary" onClick={onClose}>
             关闭
           </Button>

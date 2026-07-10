@@ -1,32 +1,102 @@
-name: Release
+name: Release draft
 
 on:
-  push:
-    tags:
-      - 'v*'
+  workflow_dispatch:
+    inputs:
+      release_tag:
+        description: 'Existing release tag, for example v0.1.0'
+        required: true
+        type: string
+      ffmpeg_macos_x64_url:
+        description: 'HTTPS .tar.gz with root-level ffmpeg and ffprobe for macOS x64'
+        required: true
+        type: string
+      ffmpeg_macos_x64_sha256:
+        description: 'SHA-256 for the macOS x64 archive'
+        required: true
+        type: string
+      ffmpeg_macos_arm64_url:
+        description: 'HTTPS .tar.gz with root-level ffmpeg and ffprobe for macOS arm64'
+        required: true
+        type: string
+      ffmpeg_macos_arm64_sha256:
+        description: 'SHA-256 for the macOS arm64 archive'
+        required: true
+        type: string
+      ffmpeg_windows_x64_url:
+        description: 'HTTPS .zip with root-level ffmpeg.exe and ffprobe.exe for Windows x64'
+        required: true
+        type: string
+      ffmpeg_windows_x64_sha256:
+        description: 'SHA-256 for the Windows x64 archive'
+        required: true
+        type: string
+      ffmpeg_linux_x64_url:
+        description: 'HTTPS .tar.gz with root-level ffmpeg and ffprobe for Linux x64'
+        required: true
+        type: string
+      ffmpeg_linux_x64_sha256:
+        description: 'SHA-256 for the Linux x64 archive'
+        required: true
+        type: string
+      license_confirmed:
+        description: 'I confirmed the FFmpeg build license and redistribution terms'
+        required: true
+        default: false
+        type: boolean
 
 permissions:
-  contents: write
+  contents: read
+
+concurrency:
+  group: release-draft-${{ inputs.release_tag }}
+  cancel-in-progress: false
 
 jobs:
   build:
+    environment: release-draft
+    permissions:
+      contents: write
     strategy:
       fail-fast: false
       matrix:
         include:
           - platform: macos-latest
             target: x86_64-apple-darwin
+            archive: tar.gz
+            expected_arch: x86_64
+            ffmpeg_url: ${{ inputs.ffmpeg_macos_x64_url }}
+            ffmpeg_sha256: ${{ inputs.ffmpeg_macos_x64_sha256 }}
           - platform: macos-latest
             target: aarch64-apple-darwin
+            archive: tar.gz
+            expected_arch: arm64
+            ffmpeg_url: ${{ inputs.ffmpeg_macos_arm64_url }}
+            ffmpeg_sha256: ${{ inputs.ffmpeg_macos_arm64_sha256 }}
           - platform: windows-latest
             target: x86_64-pc-windows-msvc
+            archive: zip
+            ffmpeg_url: ${{ inputs.ffmpeg_windows_x64_url }}
+            ffmpeg_sha256: ${{ inputs.ffmpeg_windows_x64_sha256 }}
           - platform: ubuntu-22.04
             target: x86_64-unknown-linux-gnu
+            archive: tar.gz
+            expected_arch: x86-64
+            ffmpeg_url: ${{ inputs.ffmpeg_linux_x64_url }}
+            ffmpeg_sha256: ${{ inputs.ffmpeg_linux_x64_sha256 }}
 
     runs-on: ${{ matrix.platform }}
 
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          ref: ${{ inputs.release_tag }}
+
+      - name: Install pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 10.28.1
 
       - name: Setup Node.js
         uses: actions/setup-node@v4
@@ -34,15 +104,28 @@ jobs:
           node-version: '22'
           cache: 'pnpm'
 
-      - name: Install pnpm
-        uses: pnpm/action-setup@v4
-        with:
-          version: 10.28.1
-
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{ matrix.target }}
+
+      - name: Validate release input
+        shell: bash
+        env:
+          LICENSE_CONFIRMED: ${{ inputs.license_confirmed }}
+          RELEASE_TAG: ${{ inputs.release_tag }}
+        run: |
+          set -euo pipefail
+          if [[ "$LICENSE_CONFIRMED" != "true" ]]; then
+            echo "FFmpeg license and redistribution terms must be confirmed." >&2
+            exit 1
+          fi
+          if [[ ! "$RELEASE_TAG" =~ ^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-[0-9A-Za-z.-]+)?$ ]]; then
+            echo "Invalid release tag: $RELEASE_TAG" >&2
+            exit 1
+          fi
+          git show-ref --verify --quiet "refs/tags/$RELEASE_TAG"
+          node scripts/release-version.mjs check "$RELEASE_TAG"
 
       - name: Install dependencies (Ubuntu)
         if: matrix.platform == 'ubuntu-22.04'
@@ -53,70 +136,123 @@ jobs:
       - name: Install frontend dependencies
         run: pnpm install --frozen-lockfile
 
-      - name: Verify
+      - name: Verify source
         run: pnpm run verify
 
-      # 下载 FFmpeg
-      - name: Download FFmpeg (macOS)
-        if: matrix.platform == 'macos-latest'
-        run: |
-          mkdir -p src-tauri/binaries
-          curl -L "https://evermeet.cx/ffmpeg/getrelease/ffmpeg/zip" -o /tmp/ffmpeg.zip
-          curl -L "https://evermeet.cx/ffmpeg/getrelease/ffprobe/zip" -o /tmp/ffprobe.zip
-          unzip -o /tmp/ffmpeg.zip -d /tmp/
-          unzip -o /tmp/ffprobe.zip -d /tmp/
-          # Tauri externalBin 需要带平台后缀的文件名
-          cp /tmp/ffmpeg src-tauri/binaries/ffmpeg-${{ matrix.target }}
-          cp /tmp/ffprobe src-tauri/binaries/ffprobe-${{ matrix.target }}
-          chmod +x src-tauri/binaries/*
-          ls -la src-tauri/binaries/
-
-      - name: Download FFmpeg (Windows)
-        if: matrix.platform == 'windows-latest'
-        shell: pwsh
-        run: |
-          New-Item -ItemType Directory -Force -Path src-tauri/binaries
-          Write-Host "Downloading FFmpeg..."
-          Invoke-WebRequest -Uri "https://www.gyan.dev/ffmpeg/builds/ffmpeg-release-essentials.zip" -OutFile "$env:TEMP\ffmpeg.zip"
-          Write-Host "Extracting..."
-          Expand-Archive -Path "$env:TEMP\ffmpeg.zip" -DestinationPath "$env:TEMP\ffmpeg" -Force
-          $ffmpegDir = Get-ChildItem -Path "$env:TEMP\ffmpeg" -Directory | Select-Object -First 1
-          Write-Host "FFmpeg dir: $($ffmpegDir.FullName)"
-          Copy-Item "$($ffmpegDir.FullName)\bin\ffmpeg.exe" "src-tauri/binaries/ffmpeg-${{ matrix.target }}.exe"
-          Copy-Item "$($ffmpegDir.FullName)\bin\ffprobe.exe" "src-tauri/binaries/ffprobe-${{ matrix.target }}.exe"
-          Write-Host "Files in binaries:"
-          Get-ChildItem -Path "src-tauri/binaries" | ForEach-Object { Write-Host "  $($_.Name) - $($_.Length) bytes" }
-
-      - name: Download FFmpeg (Linux)
-        if: matrix.platform == 'ubuntu-22.04'
-        run: |
-          mkdir -p src-tauri/binaries
-          curl -L "https://johnvansickle.com/ffmpeg/releases/ffmpeg-release-amd64-static.tar.xz" -o /tmp/ffmpeg.tar.xz
-          tar -xf /tmp/ffmpeg.tar.xz -C /tmp/
-          cp /tmp/ffmpeg-*-amd64-static/ffmpeg src-tauri/binaries/ffmpeg-${{ matrix.target }}
-          cp /tmp/ffmpeg-*-amd64-static/ffprobe src-tauri/binaries/ffprobe-${{ matrix.target }}
-          chmod +x src-tauri/binaries/*
-
-      - name: Get version
-        id: version
-        run: echo "VERSION=${GITHUB_REF_NAME#v}" >> $GITHUB_OUTPUT
+      - name: Download verified FFmpeg bundle (macOS/Linux)
+        if: matrix.archive == 'tar.gz'
         shell: bash
+        env:
+          FFMPEG_URL: ${{ matrix.ffmpeg_url }}
+          FFMPEG_SHA256: ${{ matrix.ffmpeg_sha256 }}
+          EXPECTED_ARCH: ${{ matrix.expected_arch }}
+        run: |
+          set -euo pipefail
+          if [[ ! "$FFMPEG_URL" =~ ^https:// ]] || [[ ! "$FFMPEG_SHA256" =~ ^[0-9A-Fa-f]{64}$ ]]; then
+            echo "FFmpeg URL must use HTTPS and the checksum must be a SHA-256 digest." >&2
+            exit 1
+          fi
+          archive="$RUNNER_TEMP/ffmpeg-bundle.tar.gz"
+          bundle_dir="$RUNNER_TEMP/ffmpeg-bundle"
+          curl --fail --location --proto '=https' --tlsv1.2 --retry 3 "$FFMPEG_URL" --output "$archive"
+          ARCHIVE_PATH="$archive" EXPECTED_SHA256="$FFMPEG_SHA256" node -e '
+            const fs = require("node:fs");
+            const crypto = require("node:crypto");
+            const actual = crypto.createHash("sha256").update(fs.readFileSync(process.env.ARCHIVE_PATH)).digest("hex");
+            if (actual !== process.env.EXPECTED_SHA256.toLowerCase()) {
+              console.error(`FFmpeg checksum mismatch: ${actual}`);
+              process.exit(1);
+            }
+          '
+          entries="$(tar -tzf "$archive" | sed 's#^\./##' | LC_ALL=C sort)"
+          if [[ "$entries" != $'ffmpeg\nffprobe' ]]; then
+            echo "FFmpeg archive must contain only root-level ffmpeg and ffprobe files." >&2
+            exit 1
+          fi
+          mkdir -p "$bundle_dir" src-tauri/binaries
+          tar -xzf "$archive" -C "$bundle_dir"
+          test -f "$bundle_dir/ffmpeg" && test ! -L "$bundle_dir/ffmpeg"
+          test -f "$bundle_dir/ffprobe" && test ! -L "$bundle_dir/ffprobe"
+          install -m 0755 "$bundle_dir/ffmpeg" "src-tauri/binaries/ffmpeg-${{ matrix.target }}"
+          install -m 0755 "$bundle_dir/ffprobe" "src-tauri/binaries/ffprobe-${{ matrix.target }}"
+          ffmpeg_file="$(file "src-tauri/binaries/ffmpeg-${{ matrix.target }}")"
+          ffprobe_file="$(file "src-tauri/binaries/ffprobe-${{ matrix.target }}")"
+          if [[ "$ffmpeg_file" != *"$EXPECTED_ARCH"* ]] || [[ "$ffprobe_file" != *"$EXPECTED_ARCH"* ]]; then
+            echo "FFmpeg bundle architecture does not match $EXPECTED_ARCH." >&2
+            exit 1
+          fi
+          "src-tauri/binaries/ffmpeg-${{ matrix.target }}" -version
+          "src-tauri/binaries/ffprobe-${{ matrix.target }}" -version
+          source_origin="$(node -e 'process.stdout.write(new URL(process.env.FFMPEG_URL).origin)')"
+          {
+            echo "### FFmpeg ${{ matrix.target }}"
+            echo "- Source origin: $source_origin"
+            echo "- Archive SHA-256: ${FFMPEG_SHA256,,}"
+            echo "- Architecture check: $EXPECTED_ARCH"
+          } >> "$GITHUB_STEP_SUMMARY"
 
-      - name: Build Tauri
+      - name: Download verified FFmpeg bundle (Windows)
+        if: matrix.archive == 'zip'
+        shell: pwsh
+        env:
+          FFMPEG_URL: ${{ matrix.ffmpeg_url }}
+          FFMPEG_SHA256: ${{ matrix.ffmpeg_sha256 }}
+        run: |
+          $ErrorActionPreference = "Stop"
+          if (-not $env:FFMPEG_URL.StartsWith("https://") -or $env:FFMPEG_SHA256 -notmatch '^[0-9A-Fa-f]{64}$') {
+            throw "FFmpeg URL must use HTTPS and the checksum must be a SHA-256 digest."
+          }
+          $archive = Join-Path $env:RUNNER_TEMP "ffmpeg-bundle.zip"
+          $bundleDir = Join-Path $env:RUNNER_TEMP "ffmpeg-bundle"
+          Invoke-WebRequest -Uri $env:FFMPEG_URL -OutFile $archive
+          $actual = (Get-FileHash -Path $archive -Algorithm SHA256).Hash.ToLowerInvariant()
+          if ($actual -ne $env:FFMPEG_SHA256.ToLowerInvariant()) {
+            throw "FFmpeg checksum mismatch: $actual"
+          }
+          Expand-Archive -Path $archive -DestinationPath $bundleDir -Force
+          $entries = @(Get-ChildItem -Path $bundleDir -Force)
+          if ($entries.Count -ne 2 -or -not (Test-Path "$bundleDir/ffmpeg.exe" -PathType Leaf) -or -not (Test-Path "$bundleDir/ffprobe.exe" -PathType Leaf)) {
+            throw "FFmpeg archive must contain only root-level ffmpeg.exe and ffprobe.exe files."
+          }
+          New-Item -ItemType Directory -Force -Path src-tauri/binaries | Out-Null
+          Copy-Item "$bundleDir/ffmpeg.exe" "src-tauri/binaries/ffmpeg-${{ matrix.target }}.exe"
+          Copy-Item "$bundleDir/ffprobe.exe" "src-tauri/binaries/ffprobe-${{ matrix.target }}.exe"
+          function Assert-X64PE([string]$Path) {
+            $bytes = [System.IO.File]::ReadAllBytes($Path)
+            if ($bytes.Length -lt 64) { throw "Invalid PE binary: $Path" }
+            $peOffset = [BitConverter]::ToInt32($bytes, 0x3c)
+            if ($peOffset -lt 0 -or $peOffset + 6 -gt $bytes.Length) { throw "Invalid PE header: $Path" }
+            $machine = [BitConverter]::ToUInt16($bytes, $peOffset + 4)
+            if ($machine -ne 0x8664) { throw "Expected x64 PE binary: $Path" }
+          }
+          Assert-X64PE "src-tauri/binaries/ffmpeg-${{ matrix.target }}.exe"
+          Assert-X64PE "src-tauri/binaries/ffprobe-${{ matrix.target }}.exe"
+          & "src-tauri/binaries/ffmpeg-${{ matrix.target }}.exe" -version
+          & "src-tauri/binaries/ffprobe-${{ matrix.target }}.exe" -version
+          $sourceOrigin = ([Uri]$env:FFMPEG_URL).GetLeftPart([System.UriPartial]::Authority)
+          @"
+          ### FFmpeg ${{ matrix.target }}
+          - Source origin: $sourceOrigin
+          - Archive SHA-256: $($env:FFMPEG_SHA256.ToLowerInvariant())
+          - Architecture check: x86_64 PE
+          "@ | Add-Content -Path $env:GITHUB_STEP_SUMMARY
+
+      - name: Build unsigned draft bundles
         uses: tauri-apps/tauri-action@v0
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
-          tagName: ${{ github.ref_name }}
-          releaseName: '小文喵 ${{ github.ref_name }}'
+          tagName: ${{ inputs.release_tag }}
+          releaseName: '小文喵 ${{ inputs.release_tag }} (unsigned draft)'
           releaseBody: |
-            ## 下载
-            | 平台 | 文件 |
-            |------|------|
-            | macOS Intel | `小文喵_${{ steps.version.outputs.VERSION }}_x64.dmg` |
-            | macOS Apple Silicon | `小文喵_${{ steps.version.outputs.VERSION }}_aarch64.dmg` |
-            | Windows | `小文喵_${{ steps.version.outputs.VERSION }}_x64-setup.exe` |
-            | Linux (Debian/Ubuntu) | `小文喵_${{ steps.version.outputs.VERSION }}_amd64.deb` |
-          releaseDraft: false
-          prerelease: false
+            ## Internal review draft
+
+            These bundles are unsigned review artifacts. Do not distribute them until
+            FFmpeg notices, application licensing, platform signing/notarization, and
+            rollback ownership have been reviewed.
+
+            Review the attached artifact names and checksums from this run rather than
+            relying on a hard-coded download table.
+          releaseDraft: true
+          prerelease: true
           args: --target ${{ matrix.target }} --bundles ${{ matrix.platform == 'macos-latest' && 'dmg' || matrix.platform == 'windows-latest' && 'nsis' || 'deb' }}

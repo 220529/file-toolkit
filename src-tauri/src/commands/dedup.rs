@@ -1,5 +1,6 @@
 use log::{debug, info, warn};
 use rayon::prelude::*;
+use same_file::Handle;
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use std::fs::{self, File};
@@ -12,6 +13,7 @@ use tauri::{AppHandle, Emitter};
 use walkdir::WalkDir;
 
 use super::ffmpeg_utils::get_ffmpeg_path;
+use super::file_ops::{path_collision_key, validate_input_file};
 
 lazy_static::lazy_static! {
     static ref DEDUP_CANCELLED: Mutex<HashMap<String, Arc<AtomicBool>>> = Mutex::new(HashMap::new());
@@ -50,12 +52,10 @@ fn cleanup_task(task_id: &str) {
 }
 
 fn mark_task_cancelled(task_id: &str) {
-    let mut tasks = lock_cancelled_tasks();
-    let cancelled = tasks
-        .entry(task_id.to_string())
-        .or_insert_with(|| Arc::new(AtomicBool::new(false)))
-        .clone();
-    cancelled.store(true, Ordering::Relaxed);
+    let tasks = lock_cancelled_tasks();
+    if let Some(cancelled) = tasks.get(task_id) {
+        cancelled.store(true, Ordering::Relaxed);
+    }
 }
 
 fn matches_scope(path: &Path, scope: &str) -> bool {
@@ -339,10 +339,7 @@ fn move_to_trash(path: &str) -> Result<(), trash::Error> {
     match finder_ctx.delete(path) {
         Ok(()) => Ok(()),
         Err(finder_error) => {
-            debug!(
-                "[删除] Finder 回收站失败，尝试 NSFileManager: {} ({})",
-                path, finder_error
-            );
+            debug!("[删除] Finder 回收站失败，尝试 NSFileManager");
 
             let mut fallback_ctx = TrashContext::new();
             fallback_ctx.set_delete_method(DeleteMethod::NsFileManager);
@@ -363,121 +360,137 @@ fn move_to_trash(path: &str) -> Result<(), trash::Error> {
     trash::delete(path)
 }
 
-fn verify_deletion_candidates(
+fn validate_keep_one_selection(
     selected_paths: &[String],
     groups: &[DeleteGroupInput],
 ) -> (Vec<String>, Vec<DeleteFailure>) {
-    let selected_set: HashSet<&str> = selected_paths.iter().map(String::as_str).collect();
-    let relevant_groups: Vec<&DeleteGroupInput> = groups
-        .iter()
-        .filter(|group| {
-            group
-                .files
-                .iter()
-                .any(|path| selected_set.contains(path.as_str()))
-        })
-        .collect();
-
-    let mut paths_to_hash = HashSet::new();
-    for group in &relevant_groups {
-        for path in &group.files {
-            paths_to_hash.insert(path.clone());
-        }
-    }
-
-    let hash_results: HashMap<String, Result<String, String>> = paths_to_hash
-        .into_par_iter()
-        .map(|path| {
-            let result = calculate_full_hash(Path::new(&path));
-            (path, result)
-        })
-        .collect();
-
-    let mut verified = Vec::new();
+    let mut unique_selected = Vec::new();
+    let mut selected_keys = HashSet::new();
     let mut failed = Vec::new();
-    let mut processed = HashSet::new();
-
-    for group in relevant_groups {
-        let selected_in_group: Vec<&String> = group
-            .files
-            .iter()
-            .filter(|path| selected_set.contains(path.as_str()))
-            .collect();
-        if selected_in_group.is_empty() {
-            continue;
-        }
-
-        let kept_in_group: Vec<&String> = group
-            .files
-            .iter()
-            .filter(|path| !selected_set.contains(path.as_str()))
-            .collect();
-
-        if kept_in_group.is_empty() {
-            for path in selected_in_group {
-                processed.insert(path.clone());
-                failed.push(DeleteFailure {
-                    path: path.clone(),
-                    reason: "请至少保留 1 个文件".into(),
-                });
-            }
-            continue;
-        }
-
-        let keep_hashes: HashSet<String> = kept_in_group
-            .iter()
-            .filter_map(|path| match hash_results.get(path.as_str()) {
-                Some(Ok(hash)) => Some(hash.clone()),
-                _ => None,
-            })
-            .collect();
-
-        if keep_hashes.is_empty() {
-            for path in selected_in_group {
-                processed.insert(path.clone());
-                failed.push(DeleteFailure {
-                    path: path.clone(),
-                    reason: "删除前校验失败：无法读取保留文件".into(),
-                });
-            }
-            continue;
-        }
-
-        for path in selected_in_group {
-            processed.insert(path.clone());
-            match hash_results.get(path.as_str()) {
-                Some(Ok(hash)) if keep_hashes.contains(hash) => verified.push(path.clone()),
-                Some(Ok(_)) => failed.push(DeleteFailure {
-                    path: path.clone(),
-                    reason: "删除前校验未通过：内容与保留文件不一致".into(),
-                }),
-                Some(Err(reason)) => failed.push(DeleteFailure {
-                    path: path.clone(),
-                    reason: format!("删除前校验失败：{}", reason),
-                }),
-                None => failed.push(DeleteFailure {
-                    path: path.clone(),
-                    reason: "删除前校验失败：缺少校验结果".into(),
-                }),
-            }
-        }
-    }
 
     for path in selected_paths {
-        if !processed.contains(path) {
+        let key = path_collision_key(Path::new(path));
+        if selected_keys.insert(key) {
+            unique_selected.push(path.clone());
+        } else {
             failed.push(DeleteFailure {
                 path: path.clone(),
-                reason: "缺少分组信息，已取消删除".into(),
+                reason: "重复选择，已取消处理".into(),
             });
         }
     }
 
-    verified.sort();
-    verified.dedup();
-    failed.sort_by(|a, b| a.path.cmp(&b.path));
-    failed.dedup_by(|a, b| a.path == b.path && a.reason == b.reason);
+    let mut membership: HashMap<String, Vec<usize>> = HashMap::new();
+    for (index, group) in groups.iter().enumerate() {
+        let mut group_keys = HashSet::new();
+        for path in &group.files {
+            let key = path_collision_key(Path::new(path));
+            if group_keys.insert(key.clone()) {
+                membership.entry(key).or_default().push(index);
+            }
+        }
+    }
 
-    (verified, failed)
+    let mut valid = Vec::new();
+    for path in unique_selected {
+        let key = path_collision_key(Path::new(&path));
+        let Some(group_indexes) = membership.get(&key) else {
+            failed.push(DeleteFailure {
+                path,
+                reason: "缺少重复分组信息，已取消删除".into(),
+            });
+            continue;
+        };
+        if group_indexes.len() != 1 {
+            failed.push(DeleteFailure {
+                path,
+                reason: "文件出现在多个重复分组中，已取消删除".into(),
+            });
+            continue;
+        }
+
+        let has_readable_keeper = groups[group_indexes[0]].files.iter().any(|keeper| {
+            !selected_keys.contains(&path_collision_key(Path::new(keeper)))
+                && validate_input_file(Path::new(keeper)).is_ok()
+        });
+        if !has_readable_keeper {
+            failed.push(DeleteFailure {
+                path,
+                reason: "请至少保留 1 个当前可读取的文件".into(),
+            });
+            continue;
+        }
+        valid.push(path);
+    }
+
+    (valid, failed)
+}
+
+struct DeletionCandidate {
+    path: String,
+    file: File,
+    handle: Handle,
+    size: u64,
+    modified: Option<std::time::SystemTime>,
+}
+
+impl DeletionCandidate {
+    fn capture(path: String) -> Result<Self, DeleteFailure> {
+        validate_input_file(Path::new(&path)).map_err(|reason| DeleteFailure {
+            path: path.clone(),
+            reason,
+        })?;
+        let file = File::open(&path).map_err(|error| DeleteFailure {
+            path: path.clone(),
+            reason: format!("删除前无法打开文件: {}", error),
+        })?;
+        let handle = Handle::from_file(file.try_clone().map_err(|error| DeleteFailure {
+            path: path.clone(),
+            reason: format!("删除前无法复制文件句柄: {}", error),
+        })?)
+        .map_err(|error| DeleteFailure {
+            path: path.clone(),
+            reason: format!("删除前无法锁定文件身份: {}", error),
+        })?;
+        let metadata = file.metadata().map_err(|error| DeleteFailure {
+            path: path.clone(),
+            reason: format!("删除前无法读取文件信息: {}", error),
+        })?;
+
+        Ok(Self {
+            path,
+            file,
+            handle,
+            size: metadata.len(),
+            modified: metadata.modified().ok(),
+        })
+    }
+
+    fn is_unchanged(&self) -> bool {
+        let Ok(current_handle) = Handle::from_path(&self.path) else {
+            return false;
+        };
+        let Ok(path_metadata) = fs::metadata(&self.path) else {
+            return false;
+        };
+        let Ok(handle_metadata) = self.file.metadata() else {
+            return false;
+        };
+
+        current_handle == self.handle
+            && path_metadata.len() == self.size
+            && path_metadata.modified().ok() == self.modified
+            && handle_metadata.len() == self.size
+            && handle_metadata.modified().ok() == self.modified
+    }
+
+    fn full_hash(&self) -> Result<String, String> {
+        let file = self
+            .file
+            .try_clone()
+            .map_err(|error| format!("复制文件句柄失败: {}", error))?;
+        calculate_full_hash_from_file(file)
+    }
 }
 
 #[derive(Debug, Serialize, Clone)]
@@ -554,7 +567,7 @@ pub async fn find_duplicates(
     let start_time = Instant::now();
     let task_id_for_cleanup = task_id.clone();
 
-    info!("[去重] 开始扫描: {}", path);
+    info!("[去重] 开始扫描目录");
 
     let task_result = tokio::task::spawn_blocking(move || {
         let root_metadata =
@@ -965,11 +978,24 @@ pub async fn find_duplicates(
 }
 
 #[tauri::command]
-pub fn delete_files(
+pub async fn delete_files(
     paths: Vec<String>,
     use_trash: bool,
     groups: Vec<DeleteGroupInput>,
     verify_before_delete: bool,
+) -> Result<DeleteFilesResult, String> {
+    tokio::task::spawn_blocking(move || {
+        delete_files_inner(paths, use_trash, groups, verify_before_delete)
+    })
+    .await
+    .map_err(|error| format!("删除任务执行失败: {}", error))?
+}
+
+fn delete_files_inner(
+    paths: Vec<String>,
+    use_trash: bool,
+    groups: Vec<DeleteGroupInput>,
+    _verify_before_delete: bool,
 ) -> Result<DeleteFilesResult, String> {
     info!(
         "[删除] 准备删除 {} 个文件, 使用回收站: {}",
@@ -977,25 +1003,120 @@ pub fn delete_files(
         use_trash
     );
 
-    let (verified_paths, mut failed) = if verify_before_delete {
-        verify_deletion_candidates(&paths, &groups)
-    } else {
-        (paths, Vec::new())
-    };
+    let (valid_paths, mut failed) = validate_keep_one_selection(&paths, &groups);
+    let selected_keys: HashSet<String> = valid_paths
+        .iter()
+        .map(|path| path_collision_key(Path::new(path)))
+        .collect();
+    let mut group_index_by_path = HashMap::new();
+    for (group_index, group) in groups.iter().enumerate() {
+        for path in &group.files {
+            let key = path_collision_key(Path::new(path));
+            if selected_keys.contains(&key) {
+                group_index_by_path.insert(key, group_index);
+            }
+        }
+    }
+
     let mut deleted_count = 0u32;
 
-    for path in verified_paths {
-        let delete_result = delete_path(&path, use_trash);
+    for path in valid_paths {
+        let path_key = path_collision_key(Path::new(&path));
+        let Some(group_index) = group_index_by_path.get(&path_key).copied() else {
+            failed.push(DeleteFailure {
+                path,
+                reason: "删除前无法确定唯一重复分组".into(),
+            });
+            continue;
+        };
+        let candidate = match DeletionCandidate::capture(path.clone()) {
+            Ok(candidate) => candidate,
+            Err(failure) => {
+                failed.push(failure);
+                continue;
+            }
+        };
+        if !candidate.is_unchanged() {
+            failed.push(DeleteFailure {
+                path: candidate.path.clone(),
+                reason: "待删文件在校验开始前发生变化，已取消删除".into(),
+            });
+            continue;
+        }
+        let candidate_hash = match candidate.full_hash() {
+            Ok(hash) => hash,
+            Err(error) => {
+                failed.push(DeleteFailure {
+                    path: candidate.path.clone(),
+                    reason: format!("删除前无法完整校验待删文件: {}", error),
+                });
+                continue;
+            }
+        };
+        if !candidate.is_unchanged() {
+            failed.push(DeleteFailure {
+                path: candidate.path.clone(),
+                reason: "待删文件在完整校验期间发生变化，已取消删除".into(),
+            });
+            continue;
+        }
+
+        // Keep only the candidate and one possible keeper open at a time. Large duplicate
+        // sets otherwise exhaust the process file-descriptor limit before deletion starts.
+        let mut matching_keeper = None;
+        for keeper_path in &groups[group_index].files {
+            if selected_keys.contains(&path_collision_key(Path::new(keeper_path))) {
+                continue;
+            }
+            let Ok(keeper) = DeletionCandidate::capture(keeper_path.clone()) else {
+                continue;
+            };
+            if !keeper.is_unchanged() {
+                continue;
+            }
+            let Ok(keeper_hash) = keeper.full_hash() else {
+                continue;
+            };
+            if keeper_hash == candidate_hash && keeper.is_unchanged() {
+                matching_keeper = Some(keeper);
+                break;
+            }
+        }
+        let Some(keeper) = matching_keeper else {
+            failed.push(DeleteFailure {
+                path: candidate.path.clone(),
+                reason: "删除前校验失败：没有当前可读取且内容相同的保留文件".into(),
+            });
+            continue;
+        };
+
+        let final_hashes_match = candidate
+            .full_hash()
+            .and_then(|candidate_hash| {
+                keeper
+                    .full_hash()
+                    .map(|keeper_hash| candidate_hash == keeper_hash)
+            })
+            .unwrap_or(false);
+        if !final_hashes_match || !candidate.is_unchanged() || !keeper.is_unchanged() {
+            failed.push(DeleteFailure {
+                path: candidate.path.clone(),
+                reason: "文件或保留副本在最终内容复核时发生变化，已取消删除".into(),
+            });
+            continue;
+        }
+
+        let delete_result = delete_path(&candidate.path, use_trash);
 
         match delete_result {
             Ok(()) => {
                 deleted_count += 1;
-                debug!("[删除] 已删除: {}", path);
+                debug!("[删除] 已删除文件");
             }
             Err(error) => {
-                warn!("[删除] 删除失败: {} ({})", path, error);
+                warn!("[删除] 删除失败");
                 failed.push(DeleteFailure {
-                    path,
+                    path: candidate.path.clone(),
                     reason: error.to_string(),
                 });
             }
@@ -1168,11 +1289,17 @@ fn update_hash_from_file_segment(
 }
 
 fn calculate_full_hash(path: &Path) -> Result<String, String> {
+    let file = File::open(path).map_err(|error| error.to_string())?;
+    calculate_full_hash_from_file(file)
+}
+
+fn calculate_full_hash_from_file(mut file: File) -> Result<String, String> {
     use xxhash_rust::xxh3::Xxh3;
 
     const BUFFER_SIZE: usize = 1024 * 1024;
 
-    let file = File::open(path).map_err(|error| error.to_string())?;
+    file.seek(SeekFrom::Start(0))
+        .map_err(|error| error.to_string())?;
     let mut reader = BufReader::with_capacity(BUFFER_SIZE, file);
     let mut hasher = Xxh3::new();
     let mut buffer = vec![0_u8; BUFFER_SIZE];
@@ -1326,7 +1453,10 @@ mod tests {
         let missing = temp_dir.path().join("missing.txt");
         fs::write(&existing, b"hello").expect("failed to write test file");
 
-        let result = delete_files(
+        let keeper = temp_dir.path().join("keeper.txt");
+        fs::write(&keeper, b"hello").expect("failed to write keeper file");
+
+        let result = delete_files_inner(
             vec![
                 existing.to_string_lossy().to_string(),
                 missing.to_string_lossy().to_string(),
@@ -1336,6 +1466,7 @@ mod tests {
                 files: vec![
                     existing.to_string_lossy().to_string(),
                     missing.to_string_lossy().to_string(),
+                    keeper.to_string_lossy().to_string(),
                 ],
             }],
             false,
@@ -1364,7 +1495,7 @@ mod tests {
         fs::write(&duplicate, &base).expect("failed to write duplicate file");
         fs::write(&mismatch, &different).expect("failed to write mismatch file");
 
-        let result = delete_files(
+        let result = delete_files_inner(
             vec![
                 duplicate.to_string_lossy().to_string(),
                 mismatch.to_string_lossy().to_string(),

@@ -59,6 +59,7 @@ function getProgressDetail(progress: FileStatsProgress | null, selectedPath: str
 export default function FileStats({ active = true }: { active?: boolean }) {
   const [result, setResult] = useState<ScanResult | null>(null);
   const [loading, setLoading] = useState(false);
+  const [cancelling, setCancelling] = useState(false);
   const [selectedPath, setSelectedPath] = useState("");
   const [progress, setProgress] = useState<FileStatsProgress | null>(null);
   const [sortBy, setSortBy] = useState<SortMode>("size");
@@ -93,6 +94,7 @@ export default function FileStats({ active = true }: { active?: boolean }) {
     const taskId = createTaskId("file-stats");
     const isSamePath = path === selectedPath;
     currentTaskIdRef.current = taskId;
+    setCancelling(false);
 
     flushSync(() => {
       setSelectedPath(path);
@@ -128,9 +130,13 @@ export default function FileStats({ active = true }: { active?: boolean }) {
       console.error(e);
       if (!String(e).includes("取消")) {
         toast.error("扫描失败: " + e);
+      } else {
+        toast.info("已取消扫描");
       }
     } finally {
       if (currentTaskIdRef.current !== taskId) return;
+      currentTaskIdRef.current = null;
+      setCancelling(false);
       setLoading(false);
       setProgress(null);
     }
@@ -138,15 +144,13 @@ export default function FileStats({ active = true }: { active?: boolean }) {
 
   async function cancelScan() {
     const taskId = currentTaskIdRef.current;
-    if (!taskId) return;
+    if (!taskId || cancelling) return;
 
+    setCancelling(true);
     try {
       await cancelFileStats(taskId);
-      currentTaskIdRef.current = null;
-      setLoading(false);
-      setProgress(null);
-      toast.info("已取消扫描");
     } catch (e) {
+      setCancelling(false);
       console.error(e);
       toast.error("取消失败: " + e);
     }
@@ -160,13 +164,13 @@ export default function FileStats({ active = true }: { active?: boolean }) {
 
     task.reportTask({
       title: "文件统计",
-      stage: progress?.stage || "扫描文件夹",
+      stage: cancelling ? "正在取消扫描" : progress?.stage || "扫描文件夹",
       detail: getProgressDetail(progress, selectedPath),
       progress: progress && progress.total > 0 ? progress.percent : undefined,
-      cancellable: true,
-      onCancel: cancelScan,
+      cancellable: !cancelling,
+      onCancel: cancelling ? undefined : cancelScan,
     });
-  }, [loading, progress, selectedPath]);
+  }, [cancelling, loading, progress, selectedPath]);
 
   const sortedStats = result
     ? [...result.stats].sort((a, b) => {
@@ -233,8 +237,8 @@ export default function FileStats({ active = true }: { active?: boolean }) {
                 )}
                 <Badge tone="default">逻辑大小</Badge>
                 <Badge tone="info">扫描中</Badge>
-                <Button size="sm" variant="ghost" onClick={() => void cancelScan()}>
-                  取消
+                <Button size="sm" variant="ghost" onClick={() => void cancelScan()} disabled={cancelling}>
+                  {cancelling ? "取消中..." : "取消"}
                 </Button>
               </div>
             </div>

@@ -3,6 +3,10 @@ use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 
+use super::file_ops::{
+    move_file_no_replace, path_collision_key, path_entry_exists, paths_refer_to_same_file,
+    validate_input_file,
+};
 use super::logger::{log_error, log_info};
 
 #[derive(Debug, Deserialize)]
@@ -36,8 +40,10 @@ pub struct BatchRenameResult {
 }
 
 #[tauri::command]
-pub fn batch_rename(request: BatchRenameRequest) -> Result<BatchRenameResult, String> {
-    batch_rename_inner(request, true)
+pub async fn batch_rename(request: BatchRenameRequest) -> Result<BatchRenameResult, String> {
+    tokio::task::spawn_blocking(move || batch_rename_inner(request, true))
+        .await
+        .map_err(|error| format!("重命名任务执行失败: {}", error))?
 }
 
 fn batch_rename_inner(
@@ -52,15 +58,10 @@ fn batch_rename_inner(
     ));
 
     let mut items = Vec::with_capacity(request.operations.len());
-    for operation in request.operations {
+    for (index, operation) in request.operations.into_iter().enumerate() {
         let result = rename_one(&operation, execute);
         if !result.ok {
-            if let Some(error) = &result.error {
-                log_error(&format!(
-                    "[重命名] 失败: {} -> {}: {}",
-                    result.from, result.to, error
-                ));
-            }
+            log_error(&format!("[重命名] 第 {} 项失败", index + 1));
         }
         items.push(result);
     }
@@ -88,30 +89,39 @@ fn validate_operations(operations: &[RenameOperation]) -> Result<(), String> {
         return Err("没有可执行的重命名项".to_string());
     }
 
-    let sources: HashSet<PathBuf> = operations
+    let source_paths: Vec<PathBuf> = operations
         .iter()
         .map(|operation| normalize_path(&operation.from))
         .collect::<Result<_, _>>()?;
+    let source_keys: Vec<String> = source_paths
+        .iter()
+        .map(|path| path_collision_key(path))
+        .collect();
+    let sources: HashSet<&str> = source_keys.iter().map(String::as_str).collect();
+    if sources.len() != operations.len() {
+        return Err("源文件重复或仅大小写不同".into());
+    }
     let mut targets = HashSet::new();
-    for operation in operations {
-        let from = normalize_path(&operation.from)?;
+    for ((operation, from), from_key) in operations
+        .iter()
+        .zip(source_paths.iter())
+        .zip(source_keys.iter())
+    {
         let to = normalize_path(&operation.to)?;
-        if from == to {
+        let to_key = path_collision_key(&to);
+        if from.as_path() == to {
             return Err(format!("目标文件名没有变化: {}", operation.from));
         }
-        if !from.exists() {
-            return Err(format!("源文件不存在: {}", operation.from));
-        }
-        if from.is_dir() {
-            return Err(format!("暂不支持重命名文件夹: {}", operation.from));
-        }
-        if to != from && sources.contains(&to) {
+        validate_input_file(from).map_err(|error| format!("源文件不可用: {}", error))?;
+        let case_only_target =
+            from_key == &to_key && (!path_entry_exists(&to) || paths_refer_to_same_file(from, &to));
+        if sources.contains(to_key.as_str()) && !case_only_target {
             return Err(format!("目标与待重命名源文件冲突: {}", operation.to));
         }
-        if to.exists() && to != from {
+        if path_entry_exists(&to) && !paths_refer_to_same_file(from, &to) {
             return Err(format!("目标已存在: {}", operation.to));
         }
-        if !targets.insert(to.clone()) {
+        if !targets.insert(to_key) {
             return Err(format!("目标文件名重复: {}", operation.to));
         }
     }
@@ -130,8 +140,11 @@ fn rename_one(operation: &RenameOperation, execute: bool) -> RenameResultItem {
     };
 
     if execute {
-        if let Err(error) = std::fs::rename(&from, &to) {
-            return failed_item(operation, format!("重命名失败: {}", error));
+        if let Err(error) = validate_input_file(&from) {
+            return failed_item(operation, error);
+        }
+        if let Err(error) = move_file_no_replace(&from, &to) {
+            return failed_item(operation, error);
         }
     }
 
@@ -157,7 +170,11 @@ fn normalize_path(path: &str) -> Result<PathBuf, String> {
     if trimmed.is_empty() {
         return Err("路径为空".to_string());
     }
-    Ok(Path::new(trimmed).to_path_buf())
+    let path = Path::new(trimmed);
+    if !path.is_absolute() {
+        return Err("文件操作只接受本机绝对路径".to_string());
+    }
+    Ok(path.to_path_buf())
 }
 
 #[cfg(test)]

@@ -1,9 +1,11 @@
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
-use std::io;
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 
+use super::file_ops::{
+    move_file_no_replace, path_collision_key, path_entry_exists, validate_input_file,
+};
 use super::logger::{log_error, log_info};
 
 #[derive(Debug, Deserialize)]
@@ -37,8 +39,10 @@ pub struct OrganizeFilesResult {
 }
 
 #[tauri::command]
-pub fn organize_files(request: OrganizeFilesRequest) -> Result<OrganizeFilesResult, String> {
-    organize_files_inner(request, true)
+pub async fn organize_files(request: OrganizeFilesRequest) -> Result<OrganizeFilesResult, String> {
+    tokio::task::spawn_blocking(move || organize_files_inner(request, true))
+        .await
+        .map_err(|error| format!("归类任务执行失败: {}", error))?
 }
 
 fn organize_files_inner(
@@ -53,15 +57,10 @@ fn organize_files_inner(
     ));
 
     let mut items = Vec::with_capacity(request.operations.len());
-    for operation in request.operations {
+    for (index, operation) in request.operations.into_iter().enumerate() {
         let result = move_one(&operation, execute);
         if !result.ok {
-            if let Some(error) = &result.error {
-                log_error(&format!(
-                    "[文件归类] 失败: {} -> {}: {}",
-                    result.from, result.to, error
-                ));
-            }
+            log_error(&format!("[文件归类] 第 {} 项失败", index + 1));
         }
         items.push(result);
     }
@@ -89,31 +88,31 @@ fn validate_operations(operations: &[OrganizeOperation]) -> Result<(), String> {
         return Err("没有可执行的归类项".to_string());
     }
 
-    let mut sources = HashSet::new();
+    let source_keys: Vec<String> = operations
+        .iter()
+        .map(|operation| normalize_path(&operation.from).map(|path| path_collision_key(&path)))
+        .collect::<Result<_, _>>()?;
+    let sources: HashSet<&str> = source_keys.iter().map(String::as_str).collect();
+    if sources.len() != operations.len() {
+        return Err("源文件重复或仅大小写不同".into());
+    }
     let mut targets = HashSet::new();
 
-    for operation in operations {
+    for (operation, from_key) in operations.iter().zip(source_keys.iter()) {
         let from = normalize_path(&operation.from)?;
         let to = normalize_path(&operation.to)?;
-        if !sources.insert(from.clone()) {
-            return Err(format!("源文件重复: {}", operation.from));
-        }
+        let to_key = path_collision_key(&to);
         if from == to {
             return Err(format!("目标路径没有变化: {}", operation.from));
         }
-        if !from.exists() {
-            return Err(format!("源文件不存在: {}", operation.from));
-        }
-        if from.is_dir() {
-            return Err(format!("暂不支持归类文件夹: {}", operation.from));
-        }
-        if sources.contains(&to) {
+        validate_input_file(&from).map_err(|error| format!("源文件不可用: {}", error))?;
+        if sources.contains(to_key.as_str()) || from_key == &to_key {
             return Err(format!("目标与待归类源文件冲突: {}", operation.to));
         }
-        if to.exists() {
+        if path_entry_exists(&to) {
             return Err(format!("目标已存在: {}", operation.to));
         }
-        if !targets.insert(to.clone()) {
+        if !targets.insert(to_key) {
             return Err(format!("目标路径重复: {}", operation.to));
         }
     }
@@ -132,12 +131,18 @@ fn move_one(operation: &OrganizeOperation, execute: bool) -> OrganizeResultItem 
     };
 
     if execute {
+        if let Err(error) = validate_input_file(&from) {
+            return failed_item(operation, error);
+        }
+        if path_entry_exists(&to) {
+            return failed_item(operation, "目标已存在".into());
+        }
         if let Some(parent) = to.parent() {
             if let Err(error) = std::fs::create_dir_all(parent) {
                 return failed_item(operation, format!("创建目标文件夹失败: {}", error));
             }
         }
-        if let Err(error) = move_file(&from, &to) {
+        if let Err(error) = move_file_no_replace(&from, &to) {
             return failed_item(operation, error);
         }
     }
@@ -159,32 +164,16 @@ fn failed_item(operation: &OrganizeOperation, error: String) -> OrganizeResultIt
     }
 }
 
-fn move_file(from: &Path, to: &Path) -> Result<(), String> {
-    match std::fs::rename(from, to) {
-        Ok(()) => Ok(()),
-        Err(error) if is_cross_device_error(&error) => {
-            std::fs::copy(from, to)
-                .map_err(|copy_error| format!("跨磁盘复制失败: {}", copy_error))?;
-            if let Err(remove_error) = std::fs::remove_file(from) {
-                let _ = std::fs::remove_file(to);
-                return Err(format!("跨磁盘复制后删除源文件失败: {}", remove_error));
-            }
-            Ok(())
-        }
-        Err(error) => Err(format!("移动失败: {}", error)),
-    }
-}
-
-fn is_cross_device_error(error: &io::Error) -> bool {
-    matches!(error.raw_os_error(), Some(17) | Some(18))
-}
-
 fn normalize_path(path: &str) -> Result<PathBuf, String> {
     let trimmed = path.trim();
     if trimmed.is_empty() {
         return Err("路径为空".to_string());
     }
-    Ok(Path::new(trimmed).to_path_buf())
+    let path = Path::new(trimmed);
+    if !path.is_absolute() {
+        return Err("文件操作只接受本机绝对路径".to_string());
+    }
+    Ok(path.to_path_buf())
 }
 
 #[cfg(test)]

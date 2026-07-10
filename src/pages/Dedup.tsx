@@ -52,10 +52,11 @@ export default function Dedup({ active = true }: { active?: boolean }) {
   const [previewImage, setPreviewImage] = useState<string | null>(null);
   const [useTrash, setUseTrash] = useState(true);
   const [scope, setScope] = useState<DedupScope>("media");
-  const [verifyBeforeDelete, setVerifyBeforeDelete] = useState(false);
   const [deleteFailures, setDeleteFailures] = useState<DeleteFailure[]>([]);
   const [deleting, setDeleting] = useState(false);
+  const [cancellingScan, setCancellingScan] = useState(false);
   const currentTaskIdRef = useRef<string | null>(null);
+  const selectedRef = useRef<Set<string>>(selected);
   const itemHeightsRef = useRef<Map<string, number>>(new Map());
   const itemObserversRef = useRef<Map<string, ResizeObserver>>(new Map());
   const listContainerRef = useRef<HTMLDivElement | null>(null);
@@ -69,6 +70,7 @@ export default function Dedup({ active = true }: { active?: boolean }) {
   const toast = useToast();
   const fileActions = useFileActions();
   const task = useTaskReporter("dedup");
+  selectedRef.current = selected;
   const {
     fileThumbnails,
     groupThumbnails,
@@ -232,16 +234,19 @@ export default function Dedup({ active = true }: { active?: boolean }) {
   }
 
   async function handleSelect(path: string) {
-    if (loading) return;
+    if (loading || deleting) return;
     const taskId = createTaskId("dedup");
     currentTaskIdRef.current = taskId;
+    setCancellingScan(false);
 
     flushSync(() => {
       setSelectedPath(path);
       setLoading(true);
       setDeleting(false);
       setResult(null);
-      setSelected(new Set());
+      const emptySelection = new Set<string>();
+      selectedRef.current = emptySelection;
+      setSelected(emptySelection);
       setExpandedGroups(new Set());
       setStepSnapshot(createEmptyStepSnapshot());
       setDeleteFailures([]);
@@ -271,9 +276,13 @@ export default function Dedup({ active = true }: { active?: boolean }) {
       console.error(e);
       if (!String(e).includes("取消")) {
         toast.error("扫描失败: " + e);
+      } else {
+        toast.info("已取消扫描");
       }
     } finally {
       if (currentTaskIdRef.current !== taskId) return;
+      currentTaskIdRef.current = null;
+      setCancellingScan(false);
       setLoading(false);
       setProgress(null);
     }
@@ -281,12 +290,22 @@ export default function Dedup({ active = true }: { active?: boolean }) {
 
   function toggleSelect(path: string) {
     if (loading || deleting) return;
-    setSelected((current) => {
-      const next = new Set(current);
-      if (next.has(path)) next.delete(path);
-      else next.add(path);
-      return next;
-    });
+    const current = selectedRef.current;
+    if (!current.has(path)) {
+      const group = result?.groups.find((item) => item.files.some((file) => file.path === path));
+      if (group) {
+        const selectedInGroup = group.files.filter((file) => current.has(file.path)).length;
+        if (selectedInGroup >= group.files.length - 1) {
+          toast.warning("每组至少保留 1 个文件");
+          return;
+        }
+      }
+    }
+    const next = new Set(current);
+    if (next.has(path)) next.delete(path);
+    else next.add(path);
+    selectedRef.current = next;
+    setSelected(next);
   }
 
   function autoSelect() {
@@ -296,11 +315,14 @@ export default function Dedup({ active = true }: { active?: boolean }) {
       const sorted = getSortedFiles(group);
       sorted.slice(1).forEach((file) => toDelete.add(file.path));
     });
+    const current = selectedRef.current;
     const sameSelection =
-      selected.size === toDelete.size &&
-      Array.from(toDelete).every((path) => selected.has(path));
+      current.size === toDelete.size &&
+      Array.from(toDelete).every((path) => current.has(path));
 
-    setSelected(sameSelection ? new Set() : toDelete);
+    const next = sameSelection ? new Set<string>() : toDelete;
+    selectedRef.current = next;
+    setSelected(next);
   }
 
   function toggleGroup(hash: string) {
@@ -318,12 +340,13 @@ export default function Dedup({ active = true }: { active?: boolean }) {
 
     const action = useTrash ? "移到回收站" : "永久删除";
     const confirmed = await confirm(
-      `确定要${action}选中的 ${selected.size} 个文件吗？${useTrash ? "" : "\n此操作不可恢复！"}`,
+      `确定要${action}选中的 ${selected.size} 个文件吗？\n每组会至少保留 1 份，并在删除前重新校验。${useTrash ? "" : "\n永久删除不可恢复！"}`,
       { title: "确认删除", kind: "warning" }
     );
 
     if (!confirmed) return;
 
+    let deletionCompleted = false;
     try {
       setDeleting(true);
       const deleteResult = await deleteFiles({
@@ -334,8 +357,9 @@ export default function Dedup({ active = true }: { active?: boolean }) {
           .map<DeleteGroupInput>((group) => ({
             files: group.files.map((file) => file.path),
           })),
-        verifyBeforeDelete,
+        verifyBeforeDelete: true,
       });
+      deletionCompleted = true;
       const failedSelection = new Set(deleteResult.failed.map((item) => item.path));
       setDeleteFailures(deleteResult.failed);
 
@@ -350,6 +374,9 @@ export default function Dedup({ active = true }: { active?: boolean }) {
       }
 
       if (selectedPath && deleteResult.deleted_count > 0) {
+        setResult(null);
+        selectedRef.current = failedSelection;
+        setSelected(failedSelection);
         const taskId = createTaskId("dedup");
         currentTaskIdRef.current = taskId;
         flushSync(() => {
@@ -374,6 +401,7 @@ export default function Dedup({ active = true }: { active?: boolean }) {
             .flatMap((group) => group.files.map((file) => file.path))
             .filter((path) => failedSelection.has(path))
         );
+        selectedRef.current = remainingFailed;
         setSelected(remainingFailed);
         setExpandedGroups(
           new Set(
@@ -383,11 +411,20 @@ export default function Dedup({ active = true }: { active?: boolean }) {
           )
         );
       } else {
+        selectedRef.current = failedSelection;
         setSelected(failedSelection);
       }
     } catch (e) {
-      toast.error("删除失败: " + e);
+      if (deletionCompleted && String(e).includes("取消")) {
+        toast.info("已取消重新扫描，已完成的删除不会回滚");
+      } else if (deletionCompleted) {
+        toast.warning("删除已完成，但结果刷新失败: " + e);
+      } else {
+        toast.error("删除失败: " + e);
+      }
     } finally {
+      currentTaskIdRef.current = null;
+      setCancellingScan(false);
       setDeleting(false);
       setLoading(false);
       setProgress(null);
@@ -396,39 +433,46 @@ export default function Dedup({ active = true }: { active?: boolean }) {
 
   async function cancelScan() {
     const taskId = currentTaskIdRef.current;
-    if (!taskId) return;
+    if (!taskId || cancellingScan) return;
 
+    setCancellingScan(true);
     try {
       await cancelDedup(taskId);
-      currentTaskIdRef.current = null;
-      setLoading(false);
-      setProgress(null);
-      setStepSnapshot(createEmptyStepSnapshot());
-      toast.info("已取消扫描");
     } catch (e) {
+      setCancellingScan(false);
       console.error(e);
       toast.error("取消失败: " + e);
     }
   }
 
   useEffect(() => {
-    if (!loading) {
+    if (!loading && !deleting) {
       task.clearTask();
       return;
     }
 
     task.reportTask({
       title: "文件去重",
-      stage: progress?.stage || "扫描文件夹",
+      stage: deleting
+        ? loading
+          ? cancellingScan
+            ? "正在取消重新扫描"
+            : "清理完成，正在重新扫描"
+          : "正在安全删除并校验文件"
+        : cancellingScan
+          ? "正在取消扫描"
+          : progress?.stage || "扫描文件夹",
       detail:
-        progress
+        deleting && !loading
+          ? `已选择 ${selectedRef.current.size} 个文件`
+          : progress
           ? getDedupProgressText(progress)
           : selectedPath || "等待扫描",
       progress: progress && progress.total > 0 ? progress.percent : undefined,
-      cancellable: true,
-      onCancel: cancelScan,
+      cancellable: loading && !cancellingScan,
+      onCancel: loading && !cancellingScan ? cancelScan : undefined,
     });
-  }, [loading, progress, selectedPath]);
+  }, [cancellingScan, deleting, loading, progress, selectedPath]);
 
   const virtualState = useMemo(() => {
     const groups = result?.groups ?? [];
@@ -535,7 +579,12 @@ export default function Dedup({ active = true }: { active?: boolean }) {
 
   return (
     <div className="mx-auto max-w-[1360px] space-y-4 pb-4">
-      <DropZone onSelect={handleSelect} loading={loading} selectedPath={selectedPath} active={active} />
+      <DropZone
+        onSelect={handleSelect}
+        loading={loading || deleting}
+        selectedPath={selectedPath}
+        active={active && !deleting}
+      />
 
       <div className="flex flex-col gap-3 rounded-[8px] border border-[var(--stroke)] bg-white px-4 py-3 shadow-[0_1px_2px_rgba(16,20,23,0.04)] md:flex-row md:items-center md:justify-between">
         <div className="min-w-0">
@@ -545,7 +594,7 @@ export default function Dedup({ active = true }: { active?: boolean }) {
         <div className="flex w-full rounded-[8px] border border-[var(--stroke)] bg-[#f7f8f5] p-1 md:w-auto">
           <button
             type="button"
-            disabled={loading}
+            disabled={loading || deleting}
             onClick={() => setScope("media")}
             className={`flex-1 rounded-[7px] px-3 py-2 text-sm font-medium transition md:flex-none ${
               scope === "media"
@@ -557,7 +606,7 @@ export default function Dedup({ active = true }: { active?: boolean }) {
           </button>
           <button
             type="button"
-            disabled={loading}
+            disabled={loading || deleting}
             onClick={() => setScope("all")}
             className={`flex-1 rounded-[7px] px-3 py-2 text-sm font-medium transition md:flex-none ${
               scope === "all"
@@ -596,10 +645,8 @@ export default function Dedup({ active = true }: { active?: boolean }) {
                 onAutoSelect={autoSelect}
                 onDeleteSelected={() => void deleteSelected()}
                 onUseTrashChange={setUseTrash}
-                onVerifyBeforeDeleteChange={setVerifyBeforeDelete}
                 selectedCount={selected.size}
                 useTrash={useTrash}
-                verifyBeforeDelete={verifyBeforeDelete}
               />
 
               <DedupGroupList

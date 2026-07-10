@@ -1,7 +1,7 @@
 use chrono::Local;
 use log::{LevelFilter, Metadata, Record};
 use std::fs::{self, OpenOptions};
-use std::io::Write;
+use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::PathBuf;
 use std::sync::{Mutex, MutexGuard, Once};
 use tauri::{AppHandle, Manager};
@@ -12,6 +12,9 @@ lazy_static::lazy_static! {
 
 static LOGGER: AppLogger = AppLogger;
 static LOGGER_INIT: Once = Once::new();
+const MAX_LOG_FILE_BYTES: u64 = 5 * 1024 * 1024;
+const MAX_LOG_LINE_CHARS: usize = 4_000;
+const RECENT_LOG_READ_BYTES: u64 = 256 * 1024;
 
 struct AppLogger;
 
@@ -45,8 +48,16 @@ impl log::Log for AppLogger {
 }
 
 fn append_log_line(path: &PathBuf, line: &str) -> std::io::Result<()> {
+    if fs::metadata(path)
+        .map(|metadata| metadata.len() >= MAX_LOG_FILE_BYTES)
+        .unwrap_or(false)
+    {
+        return Ok(());
+    }
+
     let mut file = OpenOptions::new().create(true).append(true).open(path)?;
-    writeln!(file, "{}", line)?;
+    let bounded_line: String = line.chars().take(MAX_LOG_LINE_CHARS).collect();
+    writeln!(file, "{}", bounded_line)?;
     Ok(())
 }
 
@@ -123,8 +134,24 @@ pub fn get_recent_logs(app: AppHandle, lines: Option<usize>) -> Result<String, S
         return Ok("暂无日志".to_string());
     }
 
-    let content = fs::read_to_string(&log_file).map_err(|e| format!("读取日志失败: {}", e))?;
-    let max_lines = lines.unwrap_or(200);
+    let mut file = fs::File::open(&log_file).map_err(|e| format!("读取日志失败: {}", e))?;
+    let file_len = file
+        .metadata()
+        .map_err(|e| format!("读取日志信息失败: {}", e))?
+        .len();
+    let start_offset = file_len.saturating_sub(RECENT_LOG_READ_BYTES);
+    file.seek(SeekFrom::Start(start_offset))
+        .map_err(|e| format!("定位日志失败: {}", e))?;
+    let mut bytes = Vec::with_capacity((file_len - start_offset) as usize);
+    file.read_to_end(&mut bytes)
+        .map_err(|e| format!("读取日志失败: {}", e))?;
+    let decoded = String::from_utf8_lossy(&bytes);
+    let content = if start_offset > 0 {
+        decoded.split_once('\n').map(|(_, tail)| tail).unwrap_or("")
+    } else {
+        decoded.as_ref()
+    };
+    let max_lines = lines.unwrap_or(200).clamp(1, 1_000);
     let log_lines: Vec<&str> = content.lines().collect();
     let start = log_lines.len().saturating_sub(max_lines);
 

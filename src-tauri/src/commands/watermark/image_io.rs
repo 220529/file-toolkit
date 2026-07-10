@@ -3,6 +3,7 @@ use std::fs;
 use std::io::Write;
 use std::path::Path;
 use std::process::{Command, Stdio};
+use std::sync::atomic::{AtomicBool, Ordering};
 use tauri::AppHandle;
 
 use super::super::ffmpeg_utils::{get_ffmpeg_path, get_ffprobe_path};
@@ -28,7 +29,7 @@ pub(super) fn generate_thumbnail(path: &str, app: &AppHandle) -> Result<String, 
         "5",
         &temp_path_string,
     ]);
-    let output = run_command_output(&mut command, None, "生成缩略图失败")?;
+    let output = run_command_output(&mut command, None, None, "生成缩略图失败")?;
 
     if !output.status.success() {
         remove_file_quietly(&temp_path);
@@ -46,21 +47,29 @@ pub(super) fn generate_thumbnail(path: &str, app: &AppHandle) -> Result<String, 
 }
 
 pub(super) fn probe_image_dimensions(app: &AppHandle, path: &str) -> Result<(u32, u32), String> {
+    probe_image_dimensions_tracked(app, path, None, None)
+}
+
+pub(super) fn probe_image_dimensions_tracked(
+    app: &AppHandle,
+    path: &str,
+    process_slot: Option<&ProcessSlot>,
+    cancelled: Option<&AtomicBool>,
+) -> Result<(u32, u32), String> {
     let ffprobe = get_ffprobe_path(app);
-    let output = Command::new(&ffprobe)
-        .args([
-            "-v",
-            "error",
-            "-select_streams",
-            "v:0",
-            "-show_entries",
-            "stream=width,height",
-            "-of",
-            "csv=p=0:s=x",
-            path,
-        ])
-        .output()
-        .map_err(|error| format!("获取图片信息失败: {}", error))?;
+    let mut command = Command::new(&ffprobe);
+    command.args([
+        "-v",
+        "error",
+        "-select_streams",
+        "v:0",
+        "-show_entries",
+        "stream=width,height",
+        "-of",
+        "csv=p=0:s=x",
+        path,
+    ]);
+    let output = run_command_output(&mut command, process_slot, cancelled, "获取图片信息失败")?;
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
@@ -91,6 +100,7 @@ pub(super) fn decode_image_rgba(
     image_width: u32,
     image_height: u32,
     process_slot: Option<&ProcessSlot>,
+    cancelled: Option<&AtomicBool>,
 ) -> Result<Vec<u8>, String> {
     let ffmpeg = get_ffmpeg_path(app);
     let mut command = Command::new(&ffmpeg);
@@ -107,7 +117,7 @@ pub(super) fn decode_image_rgba(
         "1",
         "pipe:1",
     ]);
-    let output = run_command_output(&mut command, process_slot, "读取图片像素失败")?;
+    let output = run_command_output(&mut command, process_slot, cancelled, "读取图片像素失败")?;
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
@@ -133,6 +143,7 @@ pub(super) fn encode_image_rgba(
     image_height: u32,
     output_path: &Path,
     process_slot: Option<&ProcessSlot>,
+    cancelled: Option<&AtomicBool>,
 ) -> Result<(), String> {
     let ffmpeg = get_ffmpeg_path(app);
     let expected_size = image_width as usize * image_height as usize * RGBA_CHANNELS;
@@ -144,7 +155,7 @@ pub(super) fn encode_image_rgba(
     let output_path_string = output_path.to_string_lossy().to_string();
     let mut child = Command::new(&ffmpeg)
         .args([
-            "-y",
+            "-n",
             "-f",
             "rawvideo",
             "-pix_fmt",
@@ -165,6 +176,12 @@ pub(super) fn encode_image_rgba(
         .spawn()
         .map_err(|error| format!("写出修复结果失败: {}", error))?;
     let _process_tracker = process_slot.map(|slot| track_process(slot, child.id()));
+    if cancelled.is_some_and(|flag| flag.load(Ordering::SeqCst)) {
+        let _ = child.kill();
+        let _ = child.wait();
+        remove_file_quietly(output_path);
+        return Err("操作已取消".into());
+    }
 
     if let Some(mut stdin) = child.stdin.take() {
         stdin.write_all(pixels).map_err(|error| {
@@ -189,6 +206,7 @@ pub(super) fn encode_image_rgba(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(super) fn run_ffmpeg_repair_fallback(
     ffmpeg: &Path,
     input_path: &str,
@@ -197,6 +215,7 @@ pub(super) fn run_ffmpeg_repair_fallback(
     image_width: u32,
     image_height: u32,
     process_slot: Option<&ProcessSlot>,
+    cancelled: Option<&AtomicBool>,
 ) -> Result<(), String> {
     let mask_path = build_temp_mask_path();
     let result = (|| -> Result<(), String> {
@@ -206,7 +225,7 @@ pub(super) fn run_ffmpeg_repair_fallback(
 
         let mut command = Command::new(ffmpeg);
         command.args([
-            "-y",
+            "-n",
             "-i",
             input_path,
             "-vf",
@@ -215,7 +234,7 @@ pub(super) fn run_ffmpeg_repair_fallback(
             "1",
             &output_path_string,
         ]);
-        let output = run_command_output(&mut command, process_slot, "处理失败")?;
+        let output = run_command_output(&mut command, process_slot, cancelled, "处理失败")?;
 
         if output.status.success() {
             Ok(())

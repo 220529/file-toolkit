@@ -1,6 +1,9 @@
-use std::process::{Command, Output, Stdio};
+use std::process::{Command, Output};
+use std::sync::atomic::AtomicBool;
 
-use super::super::process::{kill_tracked_process, new_process_slot, ProcessSlot, ProcessTracker};
+use super::super::process::{
+    kill_tracked_process, new_process_slot, run_tracked_output, ProcessSlot, ProcessTracker,
+};
 
 lazy_static::lazy_static! {
     static ref WATERMARK_FFMPEG_PROCESS: ProcessSlot = new_process_slot();
@@ -21,16 +24,8 @@ pub(super) fn track_process(slot: &ProcessSlot, pid: u32) -> ProcessTracker {
 pub(super) fn run_command_output(
     command: &mut Command,
     process_slot: Option<&ProcessSlot>,
+    cancelled: Option<&AtomicBool>,
     failure_context: &str,
 ) -> Result<Output, String> {
-    let child = command
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .map_err(|error| format!("{}: {}", failure_context, error))?;
-    let _process_tracker = process_slot.map(|slot| ProcessTracker::register(slot, child.id()));
-
-    child
-        .wait_with_output()
-        .map_err(|error| format!("{}: {}", failure_context, error))
+    run_tracked_output(command, process_slot, cancelled, failure_context)
 }

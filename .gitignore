@@ -12,6 +12,12 @@ dist
 dist-ssr
 tmp/
 *.local
+.env
+.env.*
+!.env.example
+data/
+samples/
+private-samples/
 
 # Editor directories and files
 .vscode/*
@@ -34,3 +40,9 @@ src-tauri/binaries/
 *.dmg
 *.app
 *.zip
+*.pkg
+*.exe
+*.msi
+*.deb
+*.rpm
+*.AppImage

@@ -1,33 +1,83 @@
 use log::info;
+use serde::Serialize;
 use std::io::{BufRead, BufReader};
+use std::path::PathBuf;
 use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, MutexGuard};
 use tauri::{AppHandle, Emitter};
 
 use super::ffmpeg_utils::{get_ffmpeg_path, get_ffprobe_path};
-use super::process::{kill_tracked_process, new_process_slot, ProcessSlot, ProcessTracker};
+use super::file_ops::{unique_output_path, validate_input_file, TemporaryOutput};
+use super::process::{
+    kill_tracked_process, new_process_slot, run_tracked_output, ProcessSlot, ProcessTracker,
+};
 
 lazy_static::lazy_static! {
     static ref CONVERT_CANCELLED: Arc<AtomicBool> = Arc::new(AtomicBool::new(false));
     static ref CONVERT_PROCESS: ProcessSlot = new_process_slot();
+    static ref CURRENT_CONVERT_TASK: Mutex<Option<String>> = Mutex::new(None);
+}
+
+#[derive(Clone, Serialize)]
+struct ConvertProgress {
+    task_id: String,
+    percent: f64,
+}
+
+struct ConvertTaskGuard {
+    task_id: String,
+}
+
+impl Drop for ConvertTaskGuard {
+    fn drop(&mut self) {
+        let mut current = lock_current_task();
+        if current.as_deref() == Some(self.task_id.as_str()) {
+            *current = None;
+        }
+    }
+}
+
+fn lock_current_task() -> MutexGuard<'static, Option<String>> {
+    CURRENT_CONVERT_TASK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
+fn register_convert_task(task_id: &str) -> Result<ConvertTaskGuard, String> {
+    let mut current = lock_current_task();
+    if current.is_some() {
+        return Err("已有格式转换任务正在运行".into());
+    }
+    *current = Some(task_id.to_string());
+    Ok(ConvertTaskGuard {
+        task_id: task_id.to_string(),
+    })
 }
 
 /// 获取视频时长
-fn get_duration(app: &AppHandle, path: &str) -> Result<f64, String> {
+fn get_duration(app: &AppHandle, path: &str, cancelled: &AtomicBool) -> Result<f64, String> {
     let ffprobe = get_ffprobe_path(app);
-    let output = Command::new(&ffprobe)
-        .args([
-            "-v",
-            "error",
-            "-show_entries",
-            "format=duration",
-            "-of",
-            "default=noprint_wrappers=1:nokey=1",
-            path,
-        ])
-        .output()
-        .map_err(|e| format!("执行 ffprobe 失败: {}", e))?;
+    let mut command = Command::new(&ffprobe);
+    command.args([
+        "-v",
+        "error",
+        "-show_entries",
+        "format=duration",
+        "-of",
+        "default=noprint_wrappers=1:nokey=1",
+        path,
+    ]);
+    let output = run_tracked_output(
+        &mut command,
+        Some(&CONVERT_PROCESS),
+        Some(cancelled),
+        "执行 ffprobe 失败",
+    )?;
+
+    if !output.status.success() {
+        return Err("读取视频时长失败".into());
+    }
 
     String::from_utf8_lossy(&output.stdout)
         .trim()
@@ -39,25 +89,33 @@ fn get_duration(app: &AppHandle, path: &str) -> Result<f64, String> {
 #[tauri::command]
 pub async fn convert_video(
     app: AppHandle,
+    task_id: String,
     input: String,
     output: String,
     format: String,
     quality: String,
 ) -> Result<String, String> {
+    let _task_guard = register_convert_task(&task_id)?;
     CONVERT_CANCELLED.store(false, Ordering::SeqCst);
 
+    let input_path = PathBuf::from(&input);
+    validate_input_file(&input_path)?;
+    if !matches!(format.as_str(), "mp4" | "mov" | "gif") {
+        return Err("不支持的输出格式".into());
+    }
+    if !matches!(quality.as_str(), "high" | "medium" | "low") {
+        return Err("不支持的画质选项".into());
+    }
+
+    let requested_output = PathBuf::from(&output);
+    let final_output = unique_output_path(&requested_output, &[input_path.as_path()])?;
     let ffmpeg = get_ffmpeg_path(&app);
-    let duration = get_duration(&app, &input)?;
 
-    info!(
-        "[转换] {} -> {} ({}, 画质: {})",
-        input, output, format, quality
-    );
+    info!("[转换] 开始处理 ({}, 画质: {})", format, quality);
 
-    let output_clone = output.clone();
-    let output_for_cleanup = output.clone();
     let cancelled = CONVERT_CANCELLED.clone();
     let format = format.clone();
+    let progress_task_id = task_id.clone();
 
     // 根据画质选择 CRF 值（越小质量越高）
     let crf = match quality.as_str() {
@@ -68,8 +126,11 @@ pub async fn convert_video(
     };
 
     let result = tokio::task::spawn_blocking(move || {
+        let duration = get_duration(&app, &input, &cancelled)?;
+        let temporary_output = TemporaryOutput::new(&final_output)?;
+        let temporary_output_string = temporary_output.path().to_string_lossy().to_string();
         let mut args = vec![
-            "-y".to_string(),
+            "-n".to_string(),
             "-i".to_string(),
             input.clone(),
             "-threads".to_string(),
@@ -104,7 +165,7 @@ pub async fn convert_video(
         }
 
         args.extend(["-progress".to_string(), "pipe:1".to_string()]);
-        args.push(output_clone.clone());
+        args.push(temporary_output_string);
 
         let mut child = Command::new(&ffmpeg)
             .args(&args)
@@ -114,8 +175,13 @@ pub async fn convert_video(
             .map_err(|e| format!("启动 ffmpeg 失败: {}", e))?;
 
         let _process_tracker = ProcessTracker::register(&CONVERT_PROCESS, child.id());
+        if cancelled.load(Ordering::SeqCst) {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err("操作已取消".into());
+        }
 
-        let convert_result = (|| -> Result<bool, String> {
+        let convert_result = (|| -> Result<String, String> {
             let stdout = child
                 .stdout
                 .take()
@@ -132,7 +198,13 @@ pub async fn convert_video(
                 if let Some(time_str) = line.strip_prefix("out_time=") {
                     if let Some(secs) = parse_ffmpeg_time(time_str) {
                         let progress = (secs / duration * 100.0).clamp(0.0, 100.0);
-                        let _ = app.emit("convert-progress", progress);
+                        let _ = app.emit(
+                            "convert-progress",
+                            ConvertProgress {
+                                task_id: progress_task_id.clone(),
+                                percent: progress,
+                            },
+                        );
                     }
                 }
             }
@@ -142,13 +214,23 @@ pub async fn convert_video(
                 .map_err(|e| format!("等待 ffmpeg 失败: {}", e))?;
 
             if cancelled.load(Ordering::SeqCst) {
-                let _ = std::fs::remove_file(&output_clone);
                 return Err("操作已取消".to_string());
             }
 
-            let _ = app.emit("convert-progress", 100.0);
+            if !status.success() {
+                return Err("格式转换失败".into());
+            }
 
-            Ok(status.success())
+            temporary_output.commit(&final_output)?;
+            let _ = app.emit(
+                "convert-progress",
+                ConvertProgress {
+                    task_id: progress_task_id,
+                    percent: 100.0,
+                },
+            );
+
+            Ok(final_output.to_string_lossy().to_string())
         })();
 
         convert_result
@@ -156,19 +238,19 @@ pub async fn convert_video(
     .await
     .map_err(|e| format!("任务执行失败: {}", e))??;
 
-    if result {
-        info!("[转换] 完成: {}", output);
-        Ok(output)
-    } else {
-        let _ = std::fs::remove_file(&output_for_cleanup);
-        Err("格式转换失败".into())
-    }
+    info!("[转换] 完成");
+    Ok(result)
 }
 
 /// 取消转换
 #[tauri::command]
-pub fn cancel_convert() {
-    info!("[转换] 收到取消请求");
+pub fn cancel_convert(task_id: String) {
+    let current = lock_current_task();
+    if current.as_deref() != Some(task_id.as_str()) {
+        return;
+    }
+
+    info!("[转换] 收到取消请求: {}", task_id);
     CONVERT_CANCELLED.store(true, Ordering::SeqCst);
 
     kill_tracked_process(&CONVERT_PROCESS);

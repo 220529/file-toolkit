@@ -1,4 +1,5 @@
-use std::process::Command;
+use std::process::{Command, Output, Stdio};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
 pub type ProcessSlot = Arc<Mutex<Option<u32>>>;
@@ -50,6 +51,34 @@ pub fn kill_tracked_process(slot: &ProcessSlot) {
     if let Some(pid) = pid {
         kill_process(pid);
     }
+}
+
+pub fn run_tracked_output(
+    command: &mut Command,
+    process_slot: Option<&ProcessSlot>,
+    cancelled: Option<&AtomicBool>,
+    failure_context: &str,
+) -> Result<Output, String> {
+    let mut child = command
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|error| format!("{}: {}", failure_context, error))?;
+    let _process_tracker = process_slot.map(|slot| ProcessTracker::register(slot, child.id()));
+
+    if cancelled.is_some_and(|flag| flag.load(Ordering::SeqCst)) {
+        let _ = child.kill();
+        let _ = child.wait();
+        return Err("操作已取消".into());
+    }
+
+    let output = child
+        .wait_with_output()
+        .map_err(|error| format!("{}: {}", failure_context, error))?;
+    if cancelled.is_some_and(|flag| flag.load(Ordering::SeqCst)) {
+        return Err("操作已取消".into());
+    }
+    Ok(output)
 }
 
 fn kill_process(pid: u32) {

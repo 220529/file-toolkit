@@ -8,6 +8,12 @@ pub struct CropResult {
 }
 
 #[derive(Debug, Serialize, Deserialize)]
+pub struct WatermarkBatchResult {
+    pub cancelled: bool,
+    pub items: Vec<CropResult>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
 pub struct ImageInfo {
     pub width: u32,
     pub height: u32,

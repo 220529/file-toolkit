@@ -4,7 +4,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::atomic::{AtomicBool, Ordering};
-use tauri::AppHandle;
+use tauri::{AppHandle, Manager};
 
 mod image_io;
 mod mask;
@@ -16,10 +16,12 @@ mod temp;
 mod types;
 
 use super::ffmpeg_utils::get_ffmpeg_path;
+use super::file_ops::{path_entry_exists, validate_input_file, TemporaryOutput};
 use super::logger::{log_error, log_info};
 use super::process::ProcessSlot;
 use image_io::{
-    decode_image_rgba, generate_thumbnail, probe_image_dimensions, run_ffmpeg_repair_fallback,
+    decode_image_rgba, generate_thumbnail, probe_image_dimensions, probe_image_dimensions_tracked,
+    run_ffmpeg_repair_fallback,
 };
 #[cfg(test)]
 use mask::apply_brush_strokes;
@@ -39,7 +41,7 @@ use task::{
     register_batch_task,
 };
 use temp::remove_file_quietly;
-use types::{BrushStroke, CropResult, ImageInfo};
+use types::{BrushStroke, CropResult, ImageInfo, WatermarkBatchResult};
 
 #[derive(Clone)]
 struct MaskComponent {
@@ -72,7 +74,7 @@ fn create_unique_output_path(input: &Path, suffix: &str) -> PathBuf {
     let mut candidate = parent.join(format!("{}{}{}", stem, suffix, extension));
     let mut index = 2_u32;
 
-    while candidate == input || candidate.exists() {
+    while candidate == input || path_entry_exists(&candidate) {
         candidate = parent.join(format!("{}{}-{}{}", stem, suffix, index, extension));
         index += 1;
     }
@@ -404,30 +406,32 @@ fn refine_rect_mask_by_local_contrast(
 }
 
 #[tauri::command]
-pub fn get_image_info(app: AppHandle, path: String) -> Result<ImageInfo, String> {
-    log_info(&format!("[去水印] 获取图片信息: {}", path));
+pub async fn get_image_info(app: AppHandle, path: String) -> Result<ImageInfo, String> {
+    tokio::task::spawn_blocking(move || {
+        let input = Path::new(&path);
+        validate_input_file(input)?;
+        app.asset_protocol_scope()
+            .allow_file(input)
+            .map_err(|error| format!("无法授权图片预览: {}", error))?;
+        log_info("[去水印] 获取图片信息");
 
-    let input = Path::new(&path);
-    if !input.exists() {
-        log_error(&format!("[去水印] 文件不存在: {}", path));
-        return Err("文件不存在".to_string());
-    }
+        let (width, height) = probe_image_dimensions(&app, &path).inspect_err(|_| {
+            log_error("[去水印] 获取图片尺寸失败");
+        })?;
 
-    let (width, height) = probe_image_dimensions(&app, &path).map_err(|error| {
-        log_error(&format!("[去水印] {}", error));
-        error
-    })?;
+        log_info(&format!("[去水印] 图片尺寸: {}x{}", width, height));
 
-    log_info(&format!("[去水印] 图片尺寸: {}x{}", width, height));
+        let thumbnail = generate_thumbnail(&path, &app).unwrap_or_default();
 
-    let thumbnail = generate_thumbnail(&path, &app).unwrap_or_default();
-
-    Ok(ImageInfo {
-        width,
-        height,
-        path,
-        thumbnail,
+        Ok(ImageInfo {
+            width,
+            height,
+            path,
+            thumbnail,
+        })
     })
+    .await
+    .map_err(|error| format!("读取图片信息任务失败: {}", error))?
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -451,25 +455,21 @@ fn remove_watermark_impl(
     ensure_not_cancelled(cancelled)?;
 
     let input = Path::new(input_path);
-    if !input.exists() {
-        return Err("文件不存在".to_string());
-    }
+    validate_input_file(input)?;
 
-    let (image_width, image_height) = probe_image_dimensions(app, input_path)?;
+    let (image_width, image_height) =
+        probe_image_dimensions_tracked(app, input_path, process_slot, cancelled)?;
     ensure_not_cancelled(cancelled)?;
 
     let selection = normalize_selection_bounds(image_width, image_height, x, y, width, height)?;
     let ffmpeg = get_ffmpeg_path(app);
     let output_path = create_unique_output_path(input, "_no_watermark");
+    let temporary_output = TemporaryOutput::new(&output_path)?;
+    let working_output_path = temporary_output.path().to_path_buf();
 
     log_info(&format!(
-        "[去水印] 开始处理: mode={}, rect=({}, {}, {}, {}), output={}",
-        mode,
-        selection.x,
-        selection.y,
-        selection.width,
-        selection.height,
-        output_path.display()
+        "[去水印] 开始处理: mode={}, rect=({}, {}, {}, {})",
+        mode, selection.x, selection.y, selection.width, selection.height
     ));
 
     let fill_opacity = clamp_fill_opacity(fill_opacity);
@@ -498,7 +498,14 @@ fn remove_watermark_impl(
             }
 
             ensure_not_cancelled(cancelled)?;
-            match decode_image_rgba(app, input_path, image_width, image_height, process_slot) {
+            match decode_image_rgba(
+                app,
+                input_path,
+                image_width,
+                image_height,
+                process_slot,
+                cancelled,
+            ) {
                 Ok(mut pixels) => {
                     ensure_not_cancelled(cancelled)?;
                     if use_rect_base && brush_strokes.is_empty() {
@@ -520,45 +527,43 @@ fn remove_watermark_impl(
                     }
 
                     ensure_not_cancelled(cancelled)?;
-                    if let Err(error) = run_texture_repair(
+                    if let Err(_error) = run_texture_repair(
                         app,
                         &mut pixels,
-                        &output_path,
+                        &working_output_path,
                         &mask,
                         image_width,
                         image_height,
                         process_slot,
+                        cancelled,
                     ) {
                         ensure_not_cancelled(cancelled)?;
-                        log_error(&format!(
-                            "[去水印] 纹理修补失败，回退到 FFmpeg removelogo: {}",
-                            error
-                        ));
+                        log_error("[去水印] 纹理修补失败，回退到 FFmpeg removelogo");
+                        remove_file_quietly(&working_output_path);
                         run_ffmpeg_repair_fallback(
                             &ffmpeg,
                             input_path,
-                            &output_path,
+                            &working_output_path,
                             &mask,
                             image_width,
                             image_height,
                             process_slot,
+                            cancelled,
                         )?;
                     }
                 }
-                Err(error) => {
+                Err(_error) => {
                     ensure_not_cancelled(cancelled)?;
-                    log_error(&format!(
-                        "[去水印] 读取像素失败，回退到 FFmpeg removelogo: {}",
-                        error
-                    ));
+                    log_error("[去水印] 读取像素失败，回退到 FFmpeg removelogo");
                     run_ffmpeg_repair_fallback(
                         &ffmpeg,
                         input_path,
-                        &output_path,
+                        &working_output_path,
                         &mask,
                         image_width,
                         image_height,
                         process_slot,
+                        cancelled,
                     )?;
                 }
             }
@@ -574,11 +579,11 @@ fn remove_watermark_impl(
                 selection.x,
                 selection.y
             );
-            let output_path_string = output_path.to_string_lossy().to_string();
+            let output_path_string = working_output_path.to_string_lossy().to_string();
 
             let mut command = Command::new(&ffmpeg);
             command.args([
-                "-y",
+                "-n",
                 "-i",
                 input_path,
                 "-filter_complex",
@@ -587,12 +592,12 @@ fn remove_watermark_impl(
                 "1",
                 &output_path_string,
             ]);
-            let output = run_command_output(&mut command, process_slot, "处理失败")?;
+            let output = run_command_output(&mut command, process_slot, cancelled, "处理失败")?;
 
             if !output.status.success() {
-                remove_file_quietly(&output_path);
+                remove_file_quietly(&working_output_path);
                 let stderr = String::from_utf8_lossy(&output.stderr);
-                log_error(&format!("[去水印] 处理失败: {}", stderr));
+                log_error("[去水印] FFmpeg 处理失败");
                 return Err(format!("处理失败: {}", stderr));
             }
         }
@@ -601,11 +606,11 @@ fn remove_watermark_impl(
                 "drawbox=x={}:y={}:w={}:h={}:color={}:t=fill",
                 selection.x, selection.y, selection.width, selection.height, ffmpeg_color
             );
-            let output_path_string = output_path.to_string_lossy().to_string();
+            let output_path_string = working_output_path.to_string_lossy().to_string();
 
             let mut command = Command::new(&ffmpeg);
             command.args([
-                "-y",
+                "-n",
                 "-i",
                 input_path,
                 "-vf",
@@ -614,18 +619,19 @@ fn remove_watermark_impl(
                 "1",
                 &output_path_string,
             ]);
-            let output = run_command_output(&mut command, process_slot, "处理失败")?;
+            let output = run_command_output(&mut command, process_slot, cancelled, "处理失败")?;
 
             if !output.status.success() {
-                remove_file_quietly(&output_path);
+                remove_file_quietly(&working_output_path);
                 let stderr = String::from_utf8_lossy(&output.stderr);
-                log_error(&format!("[去水印] 处理失败: {}", stderr));
+                log_error("[去水印] FFmpeg 处理失败");
                 return Err(format!("处理失败: {}", stderr));
             }
         }
     }
 
     ensure_not_cancelled(cancelled)?;
+    temporary_output.commit(&output_path)?;
 
     Ok(CropResult {
         success: true,
@@ -636,7 +642,7 @@ fn remove_watermark_impl(
 
 #[tauri::command]
 #[allow(clippy::too_many_arguments)]
-pub fn remove_watermark(
+pub async fn remove_watermark(
     app: AppHandle,
     input_path: String,
     x: u32,
@@ -651,28 +657,32 @@ pub fn remove_watermark(
     brush_strokes: Vec<BrushStroke>,
     brush_size: u32,
 ) -> Result<CropResult, String> {
-    remove_watermark_impl(
-        &app,
-        &input_path,
-        x,
-        y,
-        width,
-        height,
-        &color,
-        fill_opacity,
-        blur_strength,
-        &mode,
-        repair_base_mode.as_deref(),
-        &brush_strokes,
-        brush_size,
-        None,
-        None,
-    )
+    tokio::task::spawn_blocking(move || {
+        remove_watermark_impl(
+            &app,
+            &input_path,
+            x,
+            y,
+            width,
+            height,
+            &color,
+            fill_opacity,
+            blur_strength,
+            &mode,
+            repair_base_mode.as_deref(),
+            &brush_strokes,
+            brush_size,
+            None,
+            None,
+        )
+    })
+    .await
+    .map_err(|error| format!("水印任务执行失败: {}", error))?
 }
 
 #[tauri::command]
 #[allow(clippy::too_many_arguments)]
-pub fn batch_remove_watermark(
+pub async fn batch_remove_watermark(
     app: AppHandle,
     task_id: String,
     input_paths: Vec<String>,
@@ -689,51 +699,86 @@ pub fn batch_remove_watermark(
     repair_base_mode: Option<String>,
     brush_strokes: Vec<BrushStroke>,
     brush_size: u32,
-) -> Result<Vec<CropResult>, String> {
-    let cancelled = register_batch_task(&task_id);
-    let task_result = (|| -> Result<Vec<CropResult>, String> {
-        let total = input_paths.len();
-        let mut results = Vec::new();
-        let mut succeeded = 0usize;
-        let mut failed = 0usize;
+) -> Result<WatermarkBatchResult, String> {
+    if input_paths.is_empty() {
+        return Err("请先选择要处理的图片".into());
+    }
+    let cancelled = register_batch_task(&task_id)?;
+    let task_id_for_cleanup = task_id.clone();
+    let task_result = tokio::task::spawn_blocking(move || {
+        let task_result: Result<WatermarkBatchResult, String> = {
+            let total = input_paths.len();
+            let mut results = Vec::new();
+            let mut succeeded = 0usize;
+            let mut failed = 0usize;
+            let mut was_cancelled = false;
 
-        emit_batch_progress(&app, &task_id, "准备批量处理", 0, total, "".into(), 0, 0);
+            emit_batch_progress(&app, &task_id, "准备批量处理", 0, total, "".into(), 0, 0);
 
-        for (index, path) in input_paths.iter().enumerate() {
-            ensure_not_cancelled(Some(&cancelled))?;
+            for (index, path) in input_paths.iter().enumerate() {
+                if cancelled.load(Ordering::SeqCst) {
+                    was_cancelled = true;
+                    break;
+                }
 
-            let current_file = Path::new(path)
-                .file_name()
-                .map(|value| value.to_string_lossy().to_string())
-                .unwrap_or_else(|| path.clone());
-            emit_batch_progress(
-                &app,
-                &task_id,
-                "处理中",
-                index,
-                total,
-                current_file.clone(),
-                succeeded,
-                failed,
-            );
+                let current_file = Path::new(path)
+                    .file_name()
+                    .map(|value| value.to_string_lossy().to_string())
+                    .unwrap_or_else(|| path.clone());
+                emit_batch_progress(
+                    &app,
+                    &task_id,
+                    "处理中",
+                    index,
+                    total,
+                    current_file.clone(),
+                    succeeded,
+                    failed,
+                );
 
-            if let (Some(expected_width), Some(expected_height)) = (expected_width, expected_height)
-            {
-                match probe_image_dimensions(&app, path) {
-                    Ok((actual_width, actual_height)) => {
-                        if actual_width != expected_width || actual_height != expected_height {
+                if let (Some(expected_width), Some(expected_height)) =
+                    (expected_width, expected_height)
+                {
+                    match probe_image_dimensions_tracked(
+                        &app,
+                        path,
+                        Some(ffmpeg_process_slot()),
+                        Some(&cancelled),
+                    ) {
+                        Ok((actual_width, actual_height)) => {
+                            if actual_width != expected_width || actual_height != expected_height {
+                                failed += 1;
+                                results.push(CropResult {
+                                    success: false,
+                                    output_path: String::new(),
+                                    message: format!(
+                                        "{}: 尺寸不匹配，当前为 {}x{}，期望 {}x{}",
+                                        path,
+                                        actual_width,
+                                        actual_height,
+                                        expected_width,
+                                        expected_height
+                                    ),
+                                });
+                                emit_batch_progress(
+                                    &app,
+                                    &task_id,
+                                    "处理中",
+                                    index + 1,
+                                    total,
+                                    current_file,
+                                    succeeded,
+                                    failed,
+                                );
+                                continue;
+                            }
+                        }
+                        Err(error) => {
                             failed += 1;
                             results.push(CropResult {
                                 success: false,
                                 output_path: String::new(),
-                                message: format!(
-                                    "{}: 尺寸不匹配，当前为 {}x{}，期望 {}x{}",
-                                    path,
-                                    actual_width,
-                                    actual_height,
-                                    expected_width,
-                                    expected_height
-                                ),
+                                message: format!("{}: {}", path, error),
                             });
                             emit_batch_progress(
                                 &app,
@@ -748,6 +793,37 @@ pub fn batch_remove_watermark(
                             continue;
                         }
                     }
+                }
+
+                if cancelled.load(Ordering::SeqCst) {
+                    was_cancelled = true;
+                    break;
+                }
+                match remove_watermark_impl(
+                    &app,
+                    path,
+                    x,
+                    y,
+                    width,
+                    height,
+                    &color,
+                    fill_opacity,
+                    blur_strength,
+                    &mode,
+                    repair_base_mode.as_deref(),
+                    &brush_strokes,
+                    brush_size.max(1),
+                    Some(ffmpeg_process_slot()),
+                    Some(&cancelled),
+                ) {
+                    Ok(result) => {
+                        succeeded += 1;
+                        results.push(result);
+                    }
+                    Err(error) if error.contains("取消") || cancelled.load(Ordering::SeqCst) => {
+                        was_cancelled = true;
+                        break;
+                    }
                     Err(error) => {
                         failed += 1;
                         results.push(CropResult {
@@ -755,90 +831,53 @@ pub fn batch_remove_watermark(
                             output_path: String::new(),
                             message: format!("{}: {}", path, error),
                         });
-                        emit_batch_progress(
-                            &app,
-                            &task_id,
-                            "处理中",
-                            index + 1,
-                            total,
-                            current_file,
-                            succeeded,
-                            failed,
-                        );
-                        continue;
                     }
                 }
+
+                emit_batch_progress(
+                    &app,
+                    &task_id,
+                    "处理中",
+                    index + 1,
+                    total,
+                    current_file,
+                    succeeded,
+                    failed,
+                );
             }
 
-            ensure_not_cancelled(Some(&cancelled))?;
-            match remove_watermark_impl(
-                &app,
-                path,
-                x,
-                y,
-                width,
-                height,
-                &color,
-                fill_opacity,
-                blur_strength,
-                &mode,
-                repair_base_mode.as_deref(),
-                &brush_strokes,
-                brush_size.max(1),
-                Some(ffmpeg_process_slot()),
-                Some(&cancelled),
-            ) {
-                Ok(result) => {
-                    succeeded += 1;
-                    results.push(result);
-                }
-                Err(error) if error.contains("取消") || cancelled.load(Ordering::SeqCst) => {
-                    return Err("操作已取消".into());
-                }
-                Err(error) => {
-                    failed += 1;
-                    results.push(CropResult {
-                        success: false,
-                        output_path: String::new(),
-                        message: format!("{}: {}", path, error),
-                    });
-                }
-            }
-
+            let completed = results.len();
             emit_batch_progress(
                 &app,
                 &task_id,
-                "处理中",
-                index + 1,
+                if was_cancelled { "已取消" } else { "完成" },
+                completed,
                 total,
-                current_file,
+                "".into(),
                 succeeded,
                 failed,
             );
-        }
 
-        emit_batch_progress(
-            &app,
-            &task_id,
-            "完成",
-            total,
-            total,
-            "".into(),
-            succeeded,
-            failed,
-        );
+            Ok(WatermarkBatchResult {
+                cancelled: was_cancelled,
+                items: results,
+            })
+        };
 
-        Ok(results)
-    })();
+        task_result
+    })
+    .await;
 
-    cleanup_batch_task(&task_id);
-    task_result
+    cleanup_batch_task(&task_id_for_cleanup);
+    task_result.map_err(|error| format!("批量水印任务执行失败: {}", error))?
 }
 
 #[tauri::command]
 pub fn cancel_watermark_task(task_id: String) {
+    if !mark_batch_task_cancelled(&task_id) {
+        return;
+    }
     log_info(&format!("[去水印] 收到取消请求: {}", task_id));
-    mark_batch_task_cancelled(&task_id);
     kill_current_ffmpeg();
 }
 
@@ -889,10 +928,10 @@ mod tests {
     #[test]
     fn batch_task_cancel_flag_is_registered_and_cleaned_up() {
         let task_id = unique_task_id("watermark-cancel-test");
-        let cancelled = register_batch_task(&task_id);
+        let cancelled = register_batch_task(&task_id).expect("register batch task");
 
         assert!(!cancelled.load(Ordering::SeqCst));
-        mark_batch_task_cancelled(&task_id);
+        assert!(mark_batch_task_cancelled(&task_id));
         assert!(cancelled.load(Ordering::SeqCst));
 
         cleanup_batch_task(&task_id);

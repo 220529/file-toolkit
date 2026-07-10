@@ -23,9 +23,7 @@
       "assetProtocol": {
         "enable": true,
         "scope": [
-          "$HOME/**",
-          "$TEMP/**",
-          "/Volumes/**"
+          "$TEMP/**"
         ]
       },
       "csp": "default-src 'self'; img-src 'self' asset: https://asset.localhost data:; media-src 'self' asset: https://asset.localhost; style-src 'self' 'unsafe-inline'"

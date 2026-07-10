@@ -57,6 +57,8 @@ export default function BatchVideoTrim({ active = true }: { active?: boolean }) 
   const [timelineFrames, setTimelineFrames] = useState<string[]>([]);
   const [loadingTimeline, setLoadingTimeline] = useState(false);
   const [processing, setProcessing] = useState(false);
+  const [cancelling, setCancelling] = useState(false);
+  const [loadingInputs, setLoadingInputs] = useState(false);
   const [progress, setProgress] = useState<BatchTrimProgress | null>(null);
   const [result, setResult] = useState<BatchTrimResult | null>(null);
   const [preciseMode, setPreciseMode] = useState(false);
@@ -67,14 +69,17 @@ export default function BatchVideoTrim({ active = true }: { active?: boolean }) 
   const [reviewedSamples, setReviewedSamples] = useState<Set<string>>(new Set());
   const previewVideoRef = useRef<HTMLVideoElement | null>(null);
   const currentTaskIdRef = useRef<string | null>(null);
+  const loadingInputsRef = useRef(false);
+  const filesRef = useRef<BatchVideoFile[]>(files);
   const sampleLoadRequestIdRef = useRef(0);
   const previewFrameRequestIdRef = useRef(0);
   const task = useTaskReporter("batch-video-trim");
   const toast = useToast();
   const fileActions = useFileActions();
+  filesRef.current = files;
 
   const { dragging } = useWindowDrop({
-    active: active && !processing,
+    active: active && !processing && !loadingInputs,
     onDrop: (paths) => {
       void appendInputs(paths);
     },
@@ -125,13 +130,13 @@ export default function BatchVideoTrim({ active = true }: { active?: boolean }) 
 
     task.reportTask({
       title: "批量去片头",
-      stage: progress?.stage || "处理中",
+      stage: cancelling ? "正在取消，等待当前文件收尾" : progress?.stage || "处理中",
       detail: getProgressText(progress),
       progress: progress?.percent,
-      cancellable: true,
-      onCancel: cancelBatchTrim,
+      cancellable: !cancelling,
+      onCancel: cancelling ? undefined : cancelBatchTrim,
     });
-  }, [processing, progress]);
+  }, [cancelling, processing, progress]);
 
   useEffect(() => {
     if (!files.length) {
@@ -160,13 +165,15 @@ export default function BatchVideoTrim({ active = true }: { active?: boolean }) 
   }, [previewStrategy, samplePath, currentPreviewTime]);
 
   async function appendInputs(paths: string[]) {
-    if (processing) {
+    if (processing || loadingInputsRef.current) {
       toast.info("当前正在处理，暂时无法更换素材");
       return;
     }
 
     if (!paths.length) return;
 
+    loadingInputsRef.current = true;
+    setLoadingInputs(true);
     try {
       const incoming = await collectBatchVideoFiles(paths);
       if (incoming.length === 0) {
@@ -174,15 +181,12 @@ export default function BatchVideoTrim({ active = true }: { active?: boolean }) 
         return;
       }
 
-      let addedCount = 0;
-      setFiles((current) => {
-        const map = new Map(current.map((item) => [item.path, item]));
-        incoming.forEach((item) => {
-          if (!map.has(item.path)) addedCount += 1;
-          map.set(item.path, item);
-        });
-        return Array.from(map.values()).sort((a, b) => a.path.localeCompare(b.path));
-      });
+      const map = new Map(filesRef.current.map((item) => [item.path, item]));
+      const addedCount = incoming.filter((item) => !map.has(item.path)).length;
+      incoming.forEach((item) => map.set(item.path, item));
+      const nextFiles = Array.from(map.values()).sort((a, b) => a.path.localeCompare(b.path));
+      filesRef.current = nextFiles;
+      setFiles(nextFiles);
       setResult(null);
       if (!samplePath) {
         setSamplePath(incoming[0].path);
@@ -191,10 +195,14 @@ export default function BatchVideoTrim({ active = true }: { active?: boolean }) 
     } catch (error) {
       console.error(error);
       toast.error("载入素材失败: " + error);
+    } finally {
+      loadingInputsRef.current = false;
+      setLoadingInputs(false);
     }
   }
 
   async function selectFiles() {
+    if (processing || loadingInputsRef.current) return;
     const selected = await open({
       title: "选择视频文件",
       multiple: true,
@@ -206,6 +214,7 @@ export default function BatchVideoTrim({ active = true }: { active?: boolean }) 
   }
 
   async function selectFolder() {
+    if (processing || loadingInputsRef.current) return;
     const selected = await open({ title: "选择视频文件夹", directory: true });
     if (typeof selected === "string") {
       await appendInputs([selected]);
@@ -225,13 +234,14 @@ export default function BatchVideoTrim({ active = true }: { active?: boolean }) 
   }
 
   function removeFile(path: string) {
-    if (processing) return;
+    if (processing || loadingInputsRef.current) return;
     setFiles((current) => current.filter((item) => item.path !== path));
     setResult(null);
   }
 
   function clearFiles() {
-    if (processing) return;
+    if (processing || loadingInputsRef.current) return;
+    filesRef.current = [];
     setFiles([]);
     setResult(null);
   }
@@ -361,6 +371,7 @@ export default function BatchVideoTrim({ active = true }: { active?: boolean }) 
   }
 
   async function handleBatchTrim() {
+    if (processing || loadingInputsRef.current) return;
     if (!files.length) {
       toast.error("请先添加视频素材");
       return;
@@ -376,6 +387,7 @@ export default function BatchVideoTrim({ active = true }: { active?: boolean }) 
 
     const taskId = createTaskId("batch-video-trim");
     currentTaskIdRef.current = taskId;
+    setCancelling(false);
     setProcessing(true);
     setProgress({
       task_id: taskId,
@@ -410,9 +422,12 @@ export default function BatchVideoTrim({ active = true }: { active?: boolean }) 
           console.error("保存批量去头输出目录失败:", error);
         }
       }
-      toast.success(
-        `处理完成：${response.succeeded} 成功${response.skipped > 0 ? `，${response.skipped} 跳过` : ""}${response.failed > 0 ? `，${response.failed} 失败` : ""}`
-      );
+      const summary = `${response.succeeded} 成功${response.skipped > 0 ? `，${response.skipped} 跳过` : ""}${response.failed > 0 ? `，${response.failed} 失败` : ""}`;
+      if (response.cancelled) {
+        toast.info(`已取消批量处理；取消前已完成：${summary}`);
+      } else {
+        toast.success(`处理完成：${summary}`);
+      }
     } catch (error) {
       if (currentTaskIdRef.current !== taskId) return;
       console.error(error);
@@ -424,25 +439,27 @@ export default function BatchVideoTrim({ active = true }: { active?: boolean }) 
       }
     } finally {
       if (currentTaskIdRef.current !== taskId) return;
+      currentTaskIdRef.current = null;
       setProcessing(false);
+      setCancelling(false);
       setProgress(null);
     }
   }
 
   async function cancelBatchTrim() {
     const taskId = currentTaskIdRef.current;
-    if (!taskId) return;
+    if (!taskId || cancelling) return;
+    setCancelling(true);
     try {
       await cancelBatchVideoTrim(taskId);
-      currentTaskIdRef.current = null;
-      setProcessing(false);
-      setProgress(null);
-      toast.info("已取消批量处理");
     } catch (error) {
+      setCancelling(false);
       console.error(error);
       toast.error("取消失败: " + error);
     }
   }
+
+  const inputBusy = processing || loadingInputs;
 
   return (
     <div className="mx-auto max-w-[1360px] space-y-4">
@@ -450,7 +467,7 @@ export default function BatchVideoTrim({ active = true }: { active?: boolean }) 
         dragging={dragging}
         onSelectFiles={() => void selectFiles()}
         onSelectFolder={() => void selectFolder()}
-        processing={processing}
+        processing={inputBusy}
       />
 
       {files.length === 0 ? (
@@ -491,7 +508,7 @@ export default function BatchVideoTrim({ active = true }: { active?: boolean }) 
               previewReady={previewReady}
               previewStrategy={previewStrategy}
               previewVideoRef={previewVideoRef}
-              processing={processing}
+              processing={inputBusy}
               reviewedCount={reviewedCount}
               sampleIndex={sampleIndex}
               sampleInfo={sampleInfo}
@@ -504,6 +521,7 @@ export default function BatchVideoTrim({ active = true }: { active?: boolean }) 
 
             <BatchVideoSettingsCard
               editingTrim={editingTrim}
+              cancelling={cancelling}
               filesCount={files.length}
               onCancel={() => void cancelBatchTrim()}
               onChooseOutputDirectory={() => void chooseOutputDirectory()}
@@ -518,6 +536,7 @@ export default function BatchVideoTrim({ active = true }: { active?: boolean }) 
               outputDir={outputDir}
               outputMode={outputMode}
               preciseMode={preciseMode}
+              inputBusy={loadingInputs}
               processing={processing}
               progress={progress}
               sampleInfo={sampleInfo}
@@ -534,7 +553,7 @@ export default function BatchVideoTrim({ active = true }: { active?: boolean }) 
               files={files}
               onRemoveFile={removeFile}
               onSelectSample={setSamplePath}
-              processing={processing}
+              processing={inputBusy}
               samplePath={samplePath}
             />
 

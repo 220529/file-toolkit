@@ -21,6 +21,7 @@ import { Switch } from "../components/ui/switch";
 import { useElementWidth } from "../hooks/useElementWidth";
 import { useWindowDrop } from "../hooks/useWindowDrop";
 import { cn } from "../utils/cn";
+import { createTaskId } from "../utils/id";
 import { safeListen } from "../utils/tauriEvent";
 import { getBaseName, getExtension, stripExtension } from "../utils/path";
 import { useTimelineDragListeners } from "./videoCut/useTimelineDragListeners";
@@ -56,6 +57,8 @@ export default function VideoCut({ active = true }: { active?: boolean }) {
   const [startTime, setStartTime] = useState(0);
   const [endTime, setEndTime] = useState(0);
   const [processing, setProcessing] = useState(false);
+  const [cancelling, setCancelling] = useState(false);
+  const [preparingExport, setPreparingExport] = useState(false);
   const {
     preciseMode,
     setPreciseMode,
@@ -84,14 +87,18 @@ export default function VideoCut({ active = true }: { active?: boolean }) {
   const playbackModeRef = useRef<PlaybackMode>("manual");
   const clipPlaybackActiveRef = useRef(false);
   const loopClipPlaybackRef = useRef(false);
+  const preparingExportRef = useRef(false);
+  const mountedRef = useRef(true);
   const [startTimeInput, setStartTimeInput] = useState("");
   const [endTimeInput, setEndTimeInput] = useState("");
   const [editingStart, setEditingStart] = useState(false);
   const [editingEnd, setEditingEnd] = useState(false);
   const [progress, setProgress] = useState(0);
   const [previewReady, setPreviewReady] = useState(false);
+  const busy = processing || preparingExport;
   const toast = useToast();
   const task = useTaskReporter("video-cut");
+  const currentTaskIdRef = useRef<string | null>(null);
   videoInfoRef.current = videoInfo;
   videoPathRef.current = videoPath;
   startTimeRef.current = startTime;
@@ -127,9 +134,9 @@ export default function VideoCut({ active = true }: { active?: boolean }) {
     ensureVideoPathAvailable,
   });
   const { dragging } = useWindowDrop({
-    active,
+    active: active && !busy,
     onDrop: (paths) => {
-      if (processing) {
+      if (processing || preparingExportRef.current) {
         toast.info("当前正在处理，暂时无法更换视频");
         return;
       }
@@ -145,8 +152,7 @@ export default function VideoCut({ active = true }: { active?: boolean }) {
   useVideoCutKeyboardShortcuts({
     active,
     videoInfo,
-    processing,
-    preciseMode,
+    processing: busy,
     previewStrategy,
     previewReady,
     previewVideoRef,
@@ -176,34 +182,45 @@ export default function VideoCut({ active = true }: { active?: boolean }) {
     if (!active) return;
 
     return safeListen("video-progress", (event) => {
-      setProgress(event.payload);
+      if (event.payload.task_id !== currentTaskIdRef.current) return;
+      setProgress(event.payload.percent);
     });
   }, [active]);
 
   useEffect(() => {
-    if (!processing) {
+    if (!busy) {
       task.clearTask();
       return;
     }
 
-    const video = previewVideoRef.current;
-    if (video && !video.paused) {
-      video.pause();
+    if (processing) {
+      const video = previewVideoRef.current;
+      if (video && !video.paused) {
+        video.pause();
+      }
+      setClipPlaybackState(false);
     }
-    setClipPlaybackState(false);
 
     task.reportTask({
       title: "视频截取",
-      stage: preciseMode ? "精确模式处理中" : "快速截取处理中",
+      stage: preparingExport
+        ? "正在确认导出位置"
+        : cancelling
+          ? "正在取消截取"
+          : preciseMode
+            ? "精确模式处理中"
+            : "快速截取处理中",
       detail: videoPath ? getBaseName(videoPath) : "等待文件",
-      progress: preciseMode ? progress : undefined,
-      cancellable: preciseMode,
-      onCancel: preciseMode ? cancelCut : undefined,
+      progress: processing && preciseMode ? progress : undefined,
+      cancellable: processing && !cancelling,
+      onCancel: processing ? cancelCut : undefined,
     });
-  }, [processing, preciseMode, progress, videoPath]);
+  }, [busy, cancelling, preparingExport, processing, preciseMode, progress, videoPath]);
 
   useEffect(() => {
+    mountedRef.current = true;
     return () => {
+      mountedRef.current = false;
       loadRequestIdRef.current += 1;
       if (previewSeekRafRef.current !== null) {
         window.cancelAnimationFrame(previewSeekRafRef.current);
@@ -454,7 +471,7 @@ export default function VideoCut({ active = true }: { active?: boolean }) {
   }
 
   async function toggleClipPlayback() {
-    if (processing) return;
+    if (busy) return;
     const video = previewVideoRef.current;
     if (!video || previewStrategy !== "video" || !previewReady) return;
     if (clipDuration <= 0) return;
@@ -699,12 +716,12 @@ export default function VideoCut({ active = true }: { active?: boolean }) {
   }
 
   function handleTimelinePointerDown(event: ReactPointerEvent<HTMLDivElement>) {
-    if (processing || !videoInfo) return;
+    if (busy || !videoInfo) return;
     beginTimelineDrag("playhead", event.clientX);
   }
 
   function handleTimelinePointerMove(event: ReactPointerEvent<HTMLDivElement>) {
-    if (processing || timelineDragMode) return;
+    if (busy || timelineDragMode) return;
     const info = videoInfoRef.current;
     if (!info) return;
     setHoverTimelineTime(snapTimeToFrame(getTimelineTimeFromClientX(event.clientX), info));
@@ -717,13 +734,13 @@ export default function VideoCut({ active = true }: { active?: boolean }) {
   }
 
   function handleTimelineHandlePointerDown(mode: TimelineDragMode, event: ReactPointerEvent<HTMLButtonElement>) {
-    if (processing) return;
+    if (busy) return;
     event.stopPropagation();
     beginTimelineDrag(mode, event.clientX);
   }
 
   function handleTimelineWheel(event: ReactWheelEvent<HTMLDivElement>) {
-    if (processing || !videoInfo) return;
+    if (busy || !videoInfo) return;
     if (event.deltaY === 0) return;
 
     event.preventDefault();
@@ -736,7 +753,7 @@ export default function VideoCut({ active = true }: { active?: boolean }) {
   }
 
   function handleTimeInputWheel(event: ReactWheelEvent<HTMLInputElement>, target: "start" | "end") {
-    if (processing || !videoInfo) return;
+    if (busy || !videoInfo) return;
     if (event.deltaY === 0) return;
 
     event.preventDefault();
@@ -800,7 +817,7 @@ export default function VideoCut({ active = true }: { active?: boolean }) {
   }
 
   async function selectVideo() {
-    if (processing) {
+    if (processing || preparingExportRef.current) {
       toast.info("当前正在处理，暂时无法更换视频");
       return;
     }
@@ -819,76 +836,120 @@ export default function VideoCut({ active = true }: { active?: boolean }) {
     const currentVideoInfo = videoInfoRef.current;
     const currentStartTime = startTimeRef.current;
     const currentEndTime = endTimeRef.current;
+    const currentPreciseMode = preciseMode;
+    const currentClipDuration = currentEndTime - currentStartTime;
 
-    if (!currentVideoPath || !currentVideoInfo) return;
-    if (!(await ensureVideoPathAvailable(currentVideoPath, "截取视频"))) return;
-
-    const ext = getExtension(currentVideoPath) || "mp4";
-    const preciseOutputExt = getPreferredPreciseOutputExtension(ext);
-    const defaultOutputExt = preciseMode ? preciseOutputExt : ext;
-    const outputExtensions = preciseMode
-      ? Array.from(new Set([preciseOutputExt, "mp4", "mov", "mkv"]))
-      : Array.from(new Set([ext, "mp4"]));
-    const baseName = stripExtension(getBaseName(currentVideoPath)) || "video";
-    const defaultOutputName = `${baseName}-${formatTimeForFilename(currentStartTime)}-${formatTimeForFilename(currentEndTime)}.${defaultOutputExt}`;
-    const outputPath = await save({
-      title: "保存截取的视频",
-      defaultPath: await buildDefaultOutputPath(defaultOutputName),
-      filters: [{ name: preciseMode ? "重编码视频" : "视频文件", extensions: outputExtensions }],
-    });
-    if (!outputPath) return;
-
-    const finalOutputPath = ensureOutputPathExtension(outputPath, defaultOutputExt);
-
-    if (await isSameVideoPath(currentVideoPath, finalOutputPath)) {
-      toast.error("导出路径不能覆盖原视频，请选择新文件名或其他位置");
-      return;
-    }
-
-    const outputExt = (getExtension(finalOutputPath) || "").toLowerCase();
-    const inputExt = ext.toLowerCase();
-    if (!preciseMode && outputExt !== inputExt) {
-      toast.error("快速模式仅支持保持原视频容器导出。如需输出其他格式，请开启精确模式");
-      return;
-    }
-    if (preciseMode && !isSupportedPreciseOutputExtension(outputExt)) {
-      toast.error("精确模式当前仅支持输出 mp4、mov、m4v 或 mkv");
-      return;
-    }
-
-    if (!preciseMode && clipDuration < 1) {
-      toast.info("当前片段不足 1 秒，快速模式可能不够准，建议开启精确模式");
-    }
-
-    setProcessing(true);
-    setProgress(0);
+    if (!currentVideoPath || !currentVideoInfo || processing || preparingExportRef.current) return;
+    preparingExportRef.current = true;
+    setPreparingExport(true);
+    setTimelineDragMode(null);
     try {
-      await cutVideo({
-        precise: preciseMode,
-        input: currentVideoPath,
-        output: finalOutputPath,
-        startTime: currentStartTime,
-        endTime: currentEndTime,
+      if (!(await ensureVideoPathAvailable(currentVideoPath, "截取视频"))) return;
+      if (!mountedRef.current) return;
+
+      const ext = getExtension(currentVideoPath) || "mp4";
+      const preciseOutputExt = getPreferredPreciseOutputExtension(ext);
+      const defaultOutputExt = currentPreciseMode ? preciseOutputExt : ext;
+      const outputExtensions = currentPreciseMode
+        ? Array.from(new Set([preciseOutputExt, "mp4", "mov", "mkv"]))
+        : Array.from(new Set([ext, "mp4"]));
+      const baseName = stripExtension(getBaseName(currentVideoPath)) || "video";
+      const defaultOutputName = `${baseName}-${formatTimeForFilename(currentStartTime)}-${formatTimeForFilename(currentEndTime)}.${defaultOutputExt}`;
+      const defaultOutputPath = await buildDefaultOutputPath(defaultOutputName);
+      if (!mountedRef.current) return;
+      const outputPath = await save({
+        title: "保存截取的视频",
+        defaultPath: defaultOutputPath,
+        filters: [{ name: currentPreciseMode ? "重编码视频" : "视频文件", extensions: outputExtensions }],
       });
-      await rememberLastOutputDir(finalOutputPath);
-      toast.success("截取完成");
-    } catch (e) {
-      const message = String(e);
-      if (!message.includes("取消")) {
-        toast.error("截取失败: " + e);
-      } else {
-        toast.info("已取消截取");
+      if (!mountedRef.current || !outputPath) return;
+
+      const finalOutputPath = ensureOutputPathExtension(outputPath, defaultOutputExt);
+
+      const sameAsInput = await isSameVideoPath(currentVideoPath, finalOutputPath);
+      if (!mountedRef.current) return;
+      if (sameAsInput) {
+        toast.error("导出路径不能覆盖原视频，请选择新文件名或其他位置");
+        return;
+      }
+      let targetExists: boolean;
+      try {
+        targetExists = await pathExists(finalOutputPath);
+      } catch (error) {
+        if (!mountedRef.current) return;
+        toast.error("无法确认目标路径是否可用: " + error);
+        return;
+      }
+      if (!mountedRef.current) return;
+      if (targetExists) {
+        toast.error("目标文件已存在，请选择新的文件名");
+        return;
+      }
+
+      const outputExt = (getExtension(finalOutputPath) || "").toLowerCase();
+      const inputExt = ext.toLowerCase();
+      if (!currentPreciseMode && outputExt !== inputExt) {
+        toast.error("快速模式仅支持保持原视频容器导出。如需输出其他格式，请开启精确模式");
+        return;
+      }
+      if (currentPreciseMode && !isSupportedPreciseOutputExtension(outputExt)) {
+        toast.error("精确模式当前仅支持输出 mp4、mov、m4v 或 mkv");
+        return;
+      }
+
+      if (!currentPreciseMode && currentClipDuration < 1) {
+        toast.info("当前片段不足 1 秒，快速模式可能不够准，建议开启精确模式");
+      }
+
+      if (!mountedRef.current) return;
+      setProcessing(true);
+      setCancelling(false);
+      setProgress(0);
+      const taskId = createTaskId("video-cut");
+      currentTaskIdRef.current = taskId;
+      try {
+        await cutVideo({
+          taskId,
+          precise: currentPreciseMode,
+          input: currentVideoPath,
+          output: finalOutputPath,
+          startTime: currentStartTime,
+          endTime: currentEndTime,
+        });
+        await rememberLastOutputDir(finalOutputPath);
+        toast.success("截取完成");
+      } catch (e) {
+        const message = String(e);
+        if (!message.includes("取消")) {
+          toast.error("截取失败: " + e);
+        } else {
+          toast.info("已取消截取");
+        }
+      } finally {
+        if (currentTaskIdRef.current === taskId) {
+          currentTaskIdRef.current = null;
+          setProcessing(false);
+          setCancelling(false);
+          setProgress(0);
+        }
       }
     } finally {
-      setProcessing(false);
-      setProgress(0);
+      preparingExportRef.current = false;
+      if (mountedRef.current) setPreparingExport(false);
     }
   }
 
   async function cancelCut() {
-    await cancelVideoCut();
-    setProcessing(false);
-    setProgress(0);
+    if (!processing || cancelling) return;
+    const taskId = currentTaskIdRef.current;
+    if (!taskId) return;
+    setCancelling(true);
+    try {
+      await cancelVideoCut(taskId);
+    } catch (error) {
+      setCancelling(false);
+      toast.error("取消失败: " + error);
+    }
   }
 
   const {
@@ -930,7 +991,7 @@ export default function VideoCut({ active = true }: { active?: boolean }) {
     hoverTimelineTime,
     timelineWidth,
     timelineDragMode,
-    processing,
+    processing: busy,
     previewStrategy,
     previewReady,
     clipPlaybackActive,
@@ -989,7 +1050,7 @@ export default function VideoCut({ active = true }: { active?: boolean }) {
                     <div className="text-[11px] font-medium text-[var(--text-strong)]">高级微调</div>
                     <div className="text-[10px] text-[var(--text-muted)]">{showAdvancedControls ? "已展开" : "默认简洁"}</div>
                   </div>
-                  <Switch checked={showAdvancedControls} onCheckedChange={setShowAdvancedControls} disabled={processing} />
+                  <Switch checked={showAdvancedControls} onCheckedChange={setShowAdvancedControls} disabled={busy} />
                 </div>
               </CardContent>
             </Card>
@@ -1006,7 +1067,7 @@ export default function VideoCut({ active = true }: { active?: boolean }) {
               loadingTimelineFrames={loadingTimelineFrames}
               previewFrameError={previewFrameError}
               timelineFramesError={timelineFramesError}
-              processing={processing}
+              processing={busy}
               preciseMode={preciseMode}
               previewReady={previewReady}
               clipPlaybackActive={clipPlaybackActive}
@@ -1076,7 +1137,7 @@ export default function VideoCut({ active = true }: { active?: boolean }) {
                 <div className="rounded-[8px] border border-[var(--stroke)] bg-[#f7f8f5] px-4 py-3">
                   <div className="mb-3 flex items-center justify-between gap-3">
                     <div className="text-sm font-medium text-[var(--text-strong)]">时间范围</div>
-                    <Button variant="ghost" size="sm" className="h-7 px-2 text-[11px]" onClick={resetClipRange} disabled={processing} title="恢复整段、停止播放并回到开头">
+                    <Button variant="ghost" size="sm" className="h-7 px-2 text-[11px]" onClick={resetClipRange} disabled={busy} title="恢复整段、停止播放并回到开头">
                       恢复整段
                     </Button>
                   </div>
@@ -1117,14 +1178,14 @@ export default function VideoCut({ active = true }: { active?: boolean }) {
                           }
                         }}
                         className="font-mono"
-                        disabled={processing}
+                        disabled={busy}
                       />
                       {showAdvancedControls && (
                         <div className="mt-2 flex gap-2">
-                          <Button variant="ghost" size="sm" className="h-7 flex-1 px-2 text-[11px]" onClick={() => nudgeStartTime(-1)} disabled={processing}>
+                          <Button variant="ghost" size="sm" className="h-7 flex-1 px-2 text-[11px]" onClick={() => nudgeStartTime(-1)} disabled={busy}>
                             -1 帧
                           </Button>
-                          <Button variant="ghost" size="sm" className="h-7 flex-1 px-2 text-[11px]" onClick={() => nudgeStartTime(1)} disabled={processing}>
+                          <Button variant="ghost" size="sm" className="h-7 flex-1 px-2 text-[11px]" onClick={() => nudgeStartTime(1)} disabled={busy}>
                             +1 帧
                           </Button>
                         </div>
@@ -1174,14 +1235,14 @@ export default function VideoCut({ active = true }: { active?: boolean }) {
                           }
                         }}
                         className="font-mono"
-                        disabled={processing}
+                        disabled={busy}
                       />
                       {showAdvancedControls && (
                         <div className="mt-2 flex gap-2">
-                          <Button variant="ghost" size="sm" className="h-7 flex-1 px-2 text-[11px]" onClick={() => nudgeEndTime(-1)} disabled={processing}>
+                          <Button variant="ghost" size="sm" className="h-7 flex-1 px-2 text-[11px]" onClick={() => nudgeEndTime(-1)} disabled={busy}>
                             -1 帧
                           </Button>
-                          <Button variant="ghost" size="sm" className="h-7 flex-1 px-2 text-[11px]" onClick={() => nudgeEndTime(1)} disabled={processing}>
+                          <Button variant="ghost" size="sm" className="h-7 flex-1 px-2 text-[11px]" onClick={() => nudgeEndTime(1)} disabled={busy}>
                             +1 帧
                           </Button>
                         </div>
@@ -1203,7 +1264,7 @@ export default function VideoCut({ active = true }: { active?: boolean }) {
                       <div className="text-sm font-medium text-[var(--text-strong)]">导出方式</div>
                       <div className="mt-1 text-[11px] text-[var(--text-muted)]">{exportModeTitle}</div>
                     </div>
-                    <Switch checked={preciseMode} onCheckedChange={setPreciseMode} disabled={processing} />
+                    <Switch checked={preciseMode} onCheckedChange={setPreciseMode} disabled={busy} />
                   </div>
                   <div className="mt-2 text-[11px] leading-5 text-[var(--text-muted)]">{exportModeDetail}</div>
                   {!preciseMode && clipDuration > 0 && clipDuration < 1 && (
@@ -1224,27 +1285,37 @@ export default function VideoCut({ active = true }: { active?: boolean }) {
                   )}
                 </div>
 
-                {processing && preciseMode && (
+                {processing && (
                   <div className="space-y-2 rounded-[8px] border border-[var(--stroke)] bg-[#f7f8f5] px-4 py-3">
                     <div className="flex items-center justify-between text-sm">
-                      <span className="text-[var(--text-strong)]">正在编码</span>
-                      <span className="font-mono text-[var(--brand-600)]">{progress.toFixed(1)}%</span>
+                      <span className="text-[var(--text-strong)]">
+                        {cancelling ? "正在取消" : preciseMode ? "正在编码" : "正在快速截取"}
+                      </span>
+                      {preciseMode && <span className="font-mono text-[var(--brand-600)]">{progress.toFixed(1)}%</span>}
                     </div>
-                    <Progress value={progress} />
-                    <div className="text-[11px] text-[var(--text-muted)]">已锁定编辑，可取消当前任务。</div>
+                    {preciseMode && <Progress value={progress} />}
+                    <div className="text-[11px] text-[var(--text-muted)]">
+                      {cancelling ? "等待当前进程完全退出后恢复编辑。" : "已锁定编辑，可取消当前任务。"}
+                    </div>
                   </div>
                 )}
 
                 <div className="space-y-3 border-t border-[var(--stroke)] pt-4">
-                  <Button variant="primary" size="lg" className="w-full" onClick={handleCut} disabled={processing || clipDuration <= 0}>
-                    {primaryActionLabel}
+                  <Button
+                    variant="primary"
+                    size="lg"
+                    className="w-full"
+                    onClick={handleCut}
+                    disabled={busy || clipDuration <= 0}
+                  >
+                    {preparingExport ? "正在准备导出..." : primaryActionLabel}
                   </Button>
                   {exportUnavailableReason && (
                     <div className="text-center text-xs text-[var(--text-muted)]">{exportUnavailableReason}</div>
                   )}
-                  {processing && preciseMode && (
-                    <Button variant="danger" className="w-full" onClick={cancelCut}>
-                      取消截取
+                  {processing && (
+                    <Button variant="danger" className="w-full" onClick={cancelCut} disabled={cancelling}>
+                      {cancelling ? "正在取消..." : "取消截取"}
                     </Button>
                   )}
                 </div>

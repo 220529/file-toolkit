@@ -123,6 +123,7 @@ export function BatchVideoSummaryCard({
 }
 
 export function BatchVideoSettingsCard({
+  cancelling,
   editingTrim,
   filesCount,
   onCancel,
@@ -138,6 +139,7 @@ export function BatchVideoSettingsCard({
   outputDir,
   outputMode,
   preciseMode,
+  inputBusy,
   processing,
   progress,
   sampleInfo,
@@ -147,6 +149,7 @@ export function BatchVideoSettingsCard({
   trimInput,
   trimTime,
 }: {
+  cancelling: boolean;
   editingTrim: boolean;
   filesCount: number;
   onCancel: () => void;
@@ -162,6 +165,7 @@ export function BatchVideoSettingsCard({
   outputDir: string;
   outputMode: OutputMode;
   preciseMode: boolean;
+  inputBusy: boolean;
   processing: boolean;
   progress: BatchTrimProgress | null;
   sampleInfo: VideoInfo | null;
@@ -205,7 +209,7 @@ export function BatchVideoSettingsCard({
               }
             }}
             className="font-mono"
-            disabled={processing}
+            disabled={processing || inputBusy}
           />
           <div className="mt-2 text-[11px] text-slate-400">会统一删除每个视频开头的这段时间。</div>
         </div>
@@ -228,7 +232,7 @@ export function BatchVideoSettingsCard({
               <div className="text-sm font-medium text-slate-800">精确模式</div>
               <div className="text-[11px] text-slate-500">更准，但更慢。</div>
             </div>
-            <Switch checked={preciseMode} onCheckedChange={onPreciseModeChange} disabled={processing} />
+            <Switch checked={preciseMode} onCheckedChange={onPreciseModeChange} disabled={processing || inputBusy} />
           </div>
         </div>
 
@@ -239,7 +243,7 @@ export function BatchVideoSettingsCard({
               variant={outputMode === "source" ? "primary" : "secondary"}
               size="sm"
               onClick={() => onOutputModeChange("source")}
-              disabled={processing}
+              disabled={processing || inputBusy}
             >
               原目录
             </Button>
@@ -247,7 +251,7 @@ export function BatchVideoSettingsCard({
               variant={outputMode === "directory" ? "primary" : "secondary"}
               size="sm"
               onClick={() => onOutputModeChange("directory")}
-              disabled={processing}
+              disabled={processing || inputBusy}
             >
               指定目录
             </Button>
@@ -255,14 +259,14 @@ export function BatchVideoSettingsCard({
           {outputMode === "directory" && (
             <div className="space-y-2">
               <div className="truncate text-xs text-slate-500">{outputDir || "尚未选择输出目录"}</div>
-              <Button variant="ghost" size="sm" onClick={onChooseOutputDirectory} disabled={processing}>
+              <Button variant="ghost" size="sm" onClick={onChooseOutputDirectory} disabled={processing || inputBusy}>
                 选择目录
               </Button>
             </div>
           )}
           <div>
             <div className="mb-2 text-xs text-slate-500">文件名后缀</div>
-            <Input value={suffix} onChange={(event) => onSuffixChange(event.target.value)} disabled={processing} />
+            <Input value={suffix} onChange={(event) => onSuffixChange(event.target.value)} disabled={processing || inputBusy} />
           </div>
         </div>
 
@@ -278,15 +282,15 @@ export function BatchVideoSettingsCard({
         )}
 
         <div className="space-y-3 border-t border-slate-100 pt-4">
-          <Button variant="primary" className="w-full" onClick={onStart} disabled={processing || filesCount === 0}>
-            {processing ? "处理中…" : "开始批量去片头"}
+          <Button variant="primary" className="w-full" onClick={onStart} disabled={processing || inputBusy || filesCount === 0}>
+            {processing ? "处理中…" : inputBusy ? "正在读取素材…" : "开始批量去片头"}
           </Button>
           {processing && (
-            <Button variant="danger" className="w-full" onClick={onCancel}>
-              取消处理
+            <Button variant="danger" className="w-full" onClick={onCancel} disabled={cancelling}>
+              {cancelling ? "正在取消..." : "取消处理"}
             </Button>
           )}
-          <Button variant="ghost" className="w-full" onClick={onClearFiles} disabled={processing || filesCount === 0}>
+          <Button variant="ghost" className="w-full" onClick={onClearFiles} disabled={processing || inputBusy || filesCount === 0}>
             清空素材
           </Button>
         </div>
@@ -361,7 +365,7 @@ export function BatchVideoResultCard({
         <div>
           <CardTitle>处理结果</CardTitle>
         </div>
-        {result && <Badge tone="default">{result.total} 项</Badge>}
+        {result && <Badge tone={result.cancelled ? "warning" : "default"}>{result.cancelled ? "已取消" : `${result.total} 项`}</Badge>}
       </CardHeader>
       <CardContent>
         {!result ? (

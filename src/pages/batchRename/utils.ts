@@ -1,4 +1,12 @@
-import { getBaseName, getDirName, getExtension, getPathSeparator, joinPath, stripExtension } from "../../utils/path";
+import {
+  fileSystemCollisionKey,
+  getBaseName,
+  getDirName,
+  getExtension,
+  getPathSeparator,
+  joinPath,
+  stripExtension,
+} from "../../utils/path";
 import type { ExtensionCaseMode, NameCaseMode, RenamePreviewItem, RenamePreviewOptions, RenameRule } from "./types";
 
 export const defaultRenameRule: RenameRule = {
@@ -19,27 +27,41 @@ export function buildRenamePreview(
   options: RenamePreviewOptions = {}
 ): RenamePreviewItem[] {
   const orderedPaths = dedupePaths(paths);
-  const sourcePaths = new Set(orderedPaths);
-  const rawItems = orderedPaths.map((path, index) => buildPreviewItem(path, index, rule));
-  const counts = rawItems.reduce<Record<string, number>>((acc, item) => {
-    acc[item.nextPath] = (acc[item.nextPath] || 0) + 1;
+  const sourceCounts = orderedPaths.reduce<Record<string, number>>((acc, path) => {
+    const key = fileSystemCollisionKey(path);
+    acc[key] = (acc[key] || 0) + 1;
     return acc;
   }, {});
+  const sourcePaths = new Set(Object.keys(sourceCounts));
+  const rawItems = orderedPaths.map((path, index) => buildPreviewItem(path, index, rule));
+  const counts = rawItems.reduce<Record<string, number>>((acc, item) => {
+    const key = fileSystemCollisionKey(item.nextPath);
+    acc[key] = (acc[key] || 0) + 1;
+    return acc;
+  }, {});
+  const existingTargetPaths = new Set(
+    Array.from(options.existingTargetPaths ?? []).map(fileSystemCollisionKey)
+  );
 
   return rawItems.map((item) => {
+    const sourceKey = fileSystemCollisionKey(item.path);
+    const targetKey = fileSystemCollisionKey(item.nextPath);
     if (!item.nextName.trim()) {
       return { ...item, status: "invalid", reason: "文件名为空" };
     }
     if (/[\\/]/.test(item.nextName)) {
       return { ...item, status: "invalid", reason: "文件名不能包含路径分隔符" };
     }
-    if (counts[item.nextPath] > 1) {
+    if (sourceCounts[sourceKey] > 1) {
+      return { ...item, status: "duplicate", reason: "源路径重复或仅大小写不同" };
+    }
+    if (counts[targetKey] > 1) {
       return { ...item, status: "duplicate", reason: "目标文件名重复" };
     }
-    if (item.changed && sourcePaths.has(item.nextPath)) {
+    if (item.changed && sourcePaths.has(targetKey) && sourceKey !== targetKey) {
       return { ...item, status: "duplicate", reason: "目标与列表中的源文件冲突" };
     }
-    if (item.changed && options.existingTargetPaths?.has(item.nextPath)) {
+    if (item.changed && sourceKey !== targetKey && existingTargetPaths.has(targetKey)) {
       return { ...item, status: "exists", reason: "目标文件已存在" };
     }
     if (!item.changed) {
@@ -122,11 +144,16 @@ function dedupePaths(paths: string[]) {
 }
 
 export function collectRenameTargetPaths(items: RenamePreviewItem[]) {
-  const sourcePaths = new Set(items.map((item) => item.path));
+  const sourcePaths = new Set(items.map((item) => fileSystemCollisionKey(item.path)));
   return Array.from(
     new Set(
       items
-        .filter((item) => item.changed && item.status === "ready" && !sourcePaths.has(item.nextPath))
+        .filter(
+          (item) =>
+            item.changed &&
+            item.status === "ready" &&
+            !sourcePaths.has(fileSystemCollisionKey(item.nextPath))
+        )
         .map((item) => item.nextPath)
     )
   );

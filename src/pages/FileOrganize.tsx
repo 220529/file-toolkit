@@ -1,5 +1,5 @@
 import { open } from "@tauri-apps/plugin-dialog";
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import {
   getPathMetadata,
   organizeFiles,
@@ -61,14 +61,16 @@ export default function FileOrganize({ active = true }: Props) {
   const [undoState, setUndoState] = useState<OrganizeUndoState | null>(null);
   const [existingTargetPaths, setExistingTargetPaths] = useState<Set<string>>(() => new Set());
   const [checkingTargets, setCheckingTargets] = useState(false);
+  const [targetCheckError, setTargetCheckError] = useState<string | null>(null);
+  const loadingFilesRef = useRef(false);
   const toast = useToast();
   const task = useTaskReporter("file-organize");
   const busy = organizing || undoing;
 
   const { dragging } = useWindowDrop({
-    active,
+    active: active && !busy && !loadingFiles,
     onDrop: (paths) => {
-      if (busy) return;
+      if (busy || loadingFilesRef.current) return;
       void addFiles(paths);
     },
   });
@@ -86,30 +88,37 @@ export default function FileOrganize({ active = true }: Props) {
   );
   const readyItems = previewItems.filter((item) => item.status === "ready");
   const blocked = hasBlockingOrganizeIssue(previewItems);
-  const canOrganize = readyItems.length > 0 && !blocked && !busy && !loadingFiles && !checkingTargets;
+  const canOrganize =
+    readyItems.length > 0 &&
+    !blocked &&
+    !busy &&
+    !loadingFiles &&
+    !checkingTargets &&
+    !targetCheckError;
   const canUndo = Boolean(undoState && undoState.count > 0 && !busy && !loadingFiles);
 
   useEffect(() => {
     if (targetPathsToCheck.length === 0) {
       setExistingTargetPaths((current) => (current.size === 0 ? current : new Set()));
+      setTargetCheckError(null);
       setCheckingTargets(false);
       return;
     }
 
     let cancelled = false;
     setCheckingTargets(true);
+    setTargetCheckError(null);
     void Promise.all(
-      targetPathsToCheck.map(async (path) => {
-        try {
-          return [path, await pathExists(path)] as const;
-        } catch {
-          return [path, false] as const;
-        }
-      })
+      targetPathsToCheck.map(async (path) => [path, await pathExists(path)] as const)
     )
       .then((results) => {
         if (cancelled) return;
         setExistingTargetPaths(new Set(results.filter(([, exists]) => exists).map(([path]) => path)));
+      })
+      .catch((error) => {
+        if (cancelled) return;
+        setExistingTargetPaths(new Set());
+        setTargetCheckError(`无法确认目标路径: ${String(error)}`);
       })
       .finally(() => {
         if (!cancelled) setCheckingTargets(false);
@@ -121,7 +130,8 @@ export default function FileOrganize({ active = true }: Props) {
   }, [targetCheckKey, targetPathsToCheck]);
 
   async function addFiles(paths: string[]) {
-    if (paths.length === 0) return;
+    if (paths.length === 0 || busy || loadingFilesRef.current) return;
+    loadingFilesRef.current = true;
     setLoadingFiles(true);
     setLastResult(null);
 
@@ -146,13 +156,22 @@ export default function FileOrganize({ active = true }: Props) {
       }
 
       if (nextFiles.length > 0) {
-        setFiles((current) => [...current, ...nextFiles]);
+        setFiles((current) => {
+          const seen = new Set(current.map((file) => file.path));
+          const unique = nextFiles.filter((file) => {
+            if (seen.has(file.path)) return false;
+            seen.add(file.path);
+            return true;
+          });
+          return [...current, ...unique];
+        });
         toast.success(`已添加 ${nextFiles.length} 个文件`);
       }
       if (skipped > 0) {
         toast.warning(`已跳过 ${skipped} 个不可归类项目`);
       }
     } finally {
+      loadingFilesRef.current = false;
       setLoadingFiles(false);
     }
   }
@@ -207,7 +226,11 @@ export default function FileOrganize({ active = true }: Props) {
       const moved = new Set(successfulItems.map((item) => item.from));
       setFiles((current) => current.filter((file) => !moved.has(file.path)));
       setUndoState(buildOrganizeUndoState(successfulItems));
-      toast.success(`已归类 ${result.moved} 个文件`);
+      if (result.failed > 0) {
+        toast.warning(`已归类 ${result.moved} 个文件，${result.failed} 个失败`);
+      } else {
+        toast.success(`已归类 ${result.moved} 个文件`);
+      }
       task.reportTask({
         title: "文件归类",
         stage: "归类完成",
@@ -215,7 +238,7 @@ export default function FileOrganize({ active = true }: Props) {
         progress: 100,
         status: result.failed > 0 ? "error" : "success",
       });
-      window.setTimeout(task.clearTask, 1200);
+      task.scheduleClearTask(1200);
     } catch (error) {
       toast.error("归类失败: " + error);
       task.reportTask({
@@ -225,7 +248,7 @@ export default function FileOrganize({ active = true }: Props) {
         progress: 100,
         status: "error",
       });
-      window.setTimeout(task.clearTask, 1600);
+      task.scheduleClearTask(1600);
     } finally {
       setOrganizing(false);
     }
@@ -260,7 +283,7 @@ export default function FileOrganize({ active = true }: Props) {
         progress: 100,
         status: result.failed > 0 ? "error" : "success",
       });
-      window.setTimeout(task.clearTask, result.failed > 0 ? 1600 : 1200);
+      task.scheduleClearTask(result.failed > 0 ? 1600 : 1200);
     } catch (error) {
       toast.error("撤销失败: " + error);
       task.reportTask({
@@ -270,7 +293,7 @@ export default function FileOrganize({ active = true }: Props) {
         progress: 100,
         status: "error",
       });
-      window.setTimeout(task.clearTask, 1600);
+      task.scheduleClearTask(1600);
     } finally {
       setUndoing(false);
     }
@@ -327,12 +350,14 @@ export default function FileOrganize({ active = true }: Props) {
                   <button
                     key={option.value}
                     type="button"
+                    disabled={busy}
                     onClick={() => {
                       setMode(option.value);
                       setLastResult(null);
                     }}
                     className={cn(
                       "flex items-center justify-between rounded-[8px] border px-3 py-2 text-left transition",
+                      busy && "cursor-not-allowed opacity-60",
                       mode === option.value
                         ? "border-blue-200 bg-blue-50 text-blue-800"
                         : "border-slate-200 bg-white text-slate-700 hover:border-slate-300"
@@ -350,6 +375,7 @@ export default function FileOrganize({ active = true }: Props) {
                 <SegmentedControl
                   value={dateGranularity}
                   options={granularityOptions}
+                  disabled={busy}
                   onChange={(value) => {
                     setDateGranularity(value);
                     setLastResult(null);
@@ -369,11 +395,12 @@ export default function FileOrganize({ active = true }: Props) {
                 variant="ghost"
                 className="flex-1"
                 onClick={() => {
+                  if (loadingFilesRef.current) return;
                   setFiles([]);
                   setLastResult(null);
                   setUndoState(null);
                 }}
-                disabled={busy || files.length === 0}
+                disabled={busy || loadingFiles || files.length === 0}
               >
                 清空文件
               </Button>
@@ -400,7 +427,9 @@ export default function FileOrganize({ active = true }: Props) {
               <CardDescription className="mt-1">
                 {readyItems.length} 个可移动，{previewItems.length - readyItems.length} 个需要处理
                 {checkingTargets ? "，正在检查目标路径" : ""}
+                {targetCheckError ? "，目标路径检查失败" : ""}
               </CardDescription>
+              {targetCheckError && <div className="mt-1 text-xs text-rose-600">{targetCheckError}</div>}
             </div>
             <div className="flex items-center gap-2">
               {lastResult && (
@@ -585,10 +614,12 @@ function SegmentedControl<T extends string>({
   value,
   options,
   onChange,
+  disabled,
 }: {
   value: T;
   options: Array<{ value: T; label: string }>;
   onChange: (value: T) => void;
+  disabled?: boolean;
 }) {
   return (
     <div className="grid grid-cols-3 gap-1 rounded-[8px] border border-slate-200 bg-white p-1">
@@ -596,9 +627,11 @@ function SegmentedControl<T extends string>({
         <button
           key={item.value}
           type="button"
+          disabled={disabled}
           onClick={() => onChange(item.value)}
           className={cn(
             "h-8 rounded-[6px] text-xs font-medium transition",
+            disabled && "cursor-not-allowed opacity-60",
             value === item.value ? "bg-slate-900 text-white" : "text-slate-500 hover:bg-slate-50 hover:text-slate-900"
           )}
         >

@@ -11,13 +11,19 @@ use tauri::{AppHandle, Emitter};
 use walkdir::WalkDir;
 
 use super::ffmpeg_utils::{get_ffmpeg_path, get_ffprobe_path};
+use super::file_ops::{
+    path_collision_key, path_entry_exists, validate_input_file, validate_output_path,
+    TemporaryOutput,
+};
 use super::logger::{log_error, log_info};
-use super::process::{kill_tracked_process, new_process_slot, ProcessSlot, ProcessTracker};
+use super::process::{
+    kill_tracked_process, new_process_slot, run_tracked_output, ProcessSlot, ProcessTracker,
+};
 
 // 全局变量存储当前 FFmpeg 进程，用于取消
 lazy_static::lazy_static! {
-    static ref VIDEO_CANCELLED: Arc<AtomicBool> = Arc::new(AtomicBool::new(false));
     static ref VIDEO_FFMPEG_PROCESS: ProcessSlot = new_process_slot();
+    static ref VIDEO_TASK: Mutex<Option<ActiveVideoTask>> = Mutex::new(None);
     static ref BATCH_VIDEO_FFMPEG_PROCESS: ProcessSlot = new_process_slot();
     static ref BATCH_VIDEO_CANCELLED: Mutex<HashMap<String, Arc<AtomicBool>>> = Mutex::new(HashMap::new());
 }
@@ -32,12 +38,14 @@ fn lock_batch_cancelled_tasks() -> std::sync::MutexGuard<'static, HashMap<String
         .unwrap_or_else(|poisoned| poisoned.into_inner())
 }
 
-fn register_batch_task(task_id: &str) -> Arc<AtomicBool> {
+fn register_batch_task(task_id: &str) -> Result<Arc<AtomicBool>, String> {
     let mut tasks = lock_batch_cancelled_tasks();
-    tasks
-        .entry(task_id.to_string())
-        .or_insert_with(|| Arc::new(AtomicBool::new(false)))
-        .clone()
+    if !tasks.is_empty() {
+        return Err("已有批量视频任务正在运行".into());
+    }
+    let cancelled = Arc::new(AtomicBool::new(false));
+    tasks.insert(task_id.to_string(), cancelled.clone());
+    Ok(cancelled)
 }
 
 fn cleanup_batch_task(task_id: &str) {
@@ -45,13 +53,77 @@ fn cleanup_batch_task(task_id: &str) {
     tasks.remove(task_id);
 }
 
-fn mark_batch_task_cancelled(task_id: &str) {
-    let mut tasks = lock_batch_cancelled_tasks();
-    let cancelled = tasks
-        .entry(task_id.to_string())
-        .or_insert_with(|| Arc::new(AtomicBool::new(false)))
-        .clone();
+fn mark_batch_task_cancelled(task_id: &str) -> bool {
+    let tasks = lock_batch_cancelled_tasks();
+    let Some(cancelled) = tasks.get(task_id) else {
+        return false;
+    };
     cancelled.store(true, Ordering::Relaxed);
+    true
+}
+
+#[derive(Clone)]
+struct ActiveVideoTask {
+    task_id: String,
+    cancelled: Arc<AtomicBool>,
+}
+
+struct VideoTaskGuard {
+    task_id: String,
+}
+
+impl Drop for VideoTaskGuard {
+    fn drop(&mut self) {
+        let mut active = VIDEO_TASK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if active
+            .as_ref()
+            .is_some_and(|task| task.task_id == self.task_id)
+        {
+            *active = None;
+        }
+    }
+}
+
+fn register_video_task(task_id: &str) -> Result<(VideoTaskGuard, Arc<AtomicBool>), String> {
+    if task_id.trim().is_empty() {
+        return Err("视频截取任务标识不能为空".into());
+    }
+    let mut active = VIDEO_TASK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    if active.is_some() {
+        return Err("已有视频截取任务正在运行".into());
+    }
+    let cancelled = Arc::new(AtomicBool::new(false));
+    *active = Some(ActiveVideoTask {
+        task_id: task_id.to_string(),
+        cancelled: cancelled.clone(),
+    });
+    Ok((
+        VideoTaskGuard {
+            task_id: task_id.to_string(),
+        },
+        cancelled,
+    ))
+}
+
+fn mark_video_task_cancelled(task_id: &str) -> bool {
+    let active = VIDEO_TASK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let Some(task) = active.as_ref().filter(|task| task.task_id == task_id) else {
+        return false;
+    };
+    task.cancelled.store(true, Ordering::SeqCst);
+    true
+}
+
+#[derive(Clone, Serialize)]
+struct VideoProgress {
+    task_id: String,
+    percent: f64,
 }
 
 fn normalize_video_extension(path: &Path) -> String {
@@ -131,20 +203,24 @@ fn progress_percent(current: f64, duration: f64) -> f64 {
     (current / duration * 100.0).clamp(0.0, 100.0)
 }
 
-fn probe_output_duration(app: &AppHandle, path: &str) -> Result<f64, String> {
+fn probe_output_duration(
+    app: &AppHandle,
+    path: &str,
+    process_slot: Option<&ProcessSlot>,
+    cancelled: Option<&AtomicBool>,
+) -> Result<f64, String> {
     let ffprobe = get_ffprobe_path(app);
-    let output = Command::new(&ffprobe)
-        .args([
-            "-v",
-            "error",
-            "-show_entries",
-            "format=duration",
-            "-of",
-            "default=noprint_wrappers=1:nokey=1",
-            path,
-        ])
-        .output()
-        .map_err(|error| format!("执行 ffprobe 失败: {}", error))?;
+    let mut command = Command::new(&ffprobe);
+    command.args([
+        "-v",
+        "error",
+        "-show_entries",
+        "format=duration",
+        "-of",
+        "default=noprint_wrappers=1:nokey=1",
+        path,
+    ]);
+    let output = run_tracked_output(&mut command, process_slot, cancelled, "执行 ffprobe 失败")?;
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
@@ -171,8 +247,10 @@ fn validate_fast_cut_duration(
     app: &AppHandle,
     output: &str,
     expected_duration: f64,
+    process_slot: Option<&ProcessSlot>,
+    cancelled: Option<&AtomicBool>,
 ) -> Result<(), String> {
-    let actual_duration = match probe_output_duration(app, output) {
+    let actual_duration = match probe_output_duration(app, output, process_slot, cancelled) {
         Ok(duration) => duration,
         Err(error) => {
             let _ = std::fs::remove_file(output);
@@ -212,7 +290,7 @@ fn generate_preview_frame_with_options(
     let temp_path = temp_file.to_string_lossy().to_string();
 
     let mut args = vec![
-        "-y".to_string(),
+        "-n".to_string(),
         "-ss".to_string(),
         format!("{}", time),
         "-i".to_string(),
@@ -257,92 +335,124 @@ fn generate_preview_frame_with_options(
 
 /// 生成视频预览帧（返回 base64 编码的图片）
 #[tauri::command]
-pub fn generate_preview_frame(app: AppHandle, path: String, time: f64) -> Result<String, String> {
-    debug!("[预览] 生成预览帧: {} @ {:.2}s", path, time);
-    generate_preview_frame_with_options(&app, &path, time, None, 2)
+pub async fn generate_preview_frame(
+    app: AppHandle,
+    path: String,
+    time: f64,
+) -> Result<String, String> {
+    tokio::task::spawn_blocking(move || {
+        validate_input_file(Path::new(&path))?;
+        debug!("[预览] 生成预览帧 @ {:.2}s", time);
+        generate_preview_frame_with_options(&app, &path, time, None, 2)
+    })
+    .await
+    .map_err(|error| format!("生成预览任务失败: {}", error))?
 }
 
 /// 生成多个预览帧（用于时间轴）
 #[tauri::command]
-pub fn generate_timeline_frames(
+pub async fn generate_timeline_frames(
     app: AppHandle,
     path: String,
     count: u32,
 ) -> Result<Vec<String>, String> {
-    if count == 0 {
-        return Ok(Vec::new());
-    }
-
-    let count = count.min(24);
-    let duration = get_video_duration(app.clone(), path.clone())?;
-    if duration <= 0.0 {
-        return Err("视频时长无效，无法生成时间轴缩略帧".into());
-    }
-
-    let mut frames = Vec::new();
-    let interval = duration / (count as f64 + 1.0);
-
-    for i in 1..=count {
-        let time = interval * (i as f64);
-        match generate_preview_frame_with_options(&app, &path, time, Some(360), 6) {
-            Ok(frame) => frames.push(frame),
-            Err(_) => continue,
+    tokio::task::spawn_blocking(move || {
+        validate_input_file(Path::new(&path))?;
+        if count == 0 {
+            return Ok(Vec::new());
         }
-    }
 
-    if count > 0 && frames.is_empty() {
-        return Err("未能生成时间轴缩略帧".into());
-    }
+        let count = count.min(24);
+        let duration = get_video_duration_inner(&app, &path)?;
+        if duration <= 0.0 {
+            return Err("视频时长无效，无法生成时间轴缩略帧".into());
+        }
 
-    Ok(frames)
+        let mut frames = Vec::new();
+        let interval = duration / (count as f64 + 1.0);
+
+        for i in 1..=count {
+            let time = interval * (i as f64);
+            match generate_preview_frame_with_options(&app, &path, time, Some(360), 6) {
+                Ok(frame) => frames.push(frame),
+                Err(_) => continue,
+            }
+        }
+
+        if count > 0 && frames.is_empty() {
+            return Err("未能生成时间轴缩略帧".into());
+        }
+
+        Ok(frames)
+    })
+    .await
+    .map_err(|error| format!("生成时间轴任务失败: {}", error))?
 }
 
 /// 获取视频时长（秒）
 #[tauri::command]
-pub fn get_video_duration(app: AppHandle, path: String) -> Result<f64, String> {
-    let ffprobe = get_ffprobe_path(&app);
-    log_info(&format!(
-        "[视频] 获取时长: {}, ffprobe: {:?}",
-        path, ffprobe
-    ));
+pub async fn get_video_duration(app: AppHandle, path: String) -> Result<f64, String> {
+    tokio::task::spawn_blocking(move || get_video_duration_inner(&app, &path))
+        .await
+        .map_err(|error| format!("读取视频时长任务失败: {}", error))?
+}
 
-    let output = Command::new(&ffprobe)
-        .args([
-            "-v",
-            "error",
-            "-show_entries",
-            "format=duration",
-            "-of",
-            "default=noprint_wrappers=1:nokey=1",
-            &path,
-        ])
-        .output()
-        .map_err(|e| {
-            let msg = format!("执行 ffprobe 失败: {}", e);
-            log_error(&format!("[视频] {}", msg));
-            msg
+fn get_video_duration_inner(app: &AppHandle, path: &str) -> Result<f64, String> {
+    get_video_duration_tracked(app, path, None, None)
+}
+
+fn get_video_duration_tracked(
+    app: &AppHandle,
+    path: &str,
+    process_slot: Option<&ProcessSlot>,
+    cancelled: Option<&AtomicBool>,
+) -> Result<f64, String> {
+    validate_input_file(Path::new(path))?;
+    let ffprobe = get_ffprobe_path(app);
+    log_info("[视频] 获取时长");
+
+    let mut command = Command::new(&ffprobe);
+    command.args([
+        "-v",
+        "error",
+        "-show_entries",
+        "format=duration",
+        "-of",
+        "default=noprint_wrappers=1:nokey=1",
+        path,
+    ]);
+    let output = run_tracked_output(&mut command, process_slot, cancelled, "执行 ffprobe 失败")
+        .inspect_err(|_| {
+            log_error("[视频] 启动 ffprobe 失败");
         })?;
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
         let msg = format!("ffprobe 错误: {}", stderr);
-        log_error(&format!("[视频] {}", msg));
+        log_error("[视频] ffprobe 返回失败");
         return Err(msg);
     }
 
     let duration_str = String::from_utf8_lossy(&output.stdout);
     duration_str.trim().parse::<f64>().map_err(|e| {
         let msg = format!("解析时长失败: {}", e);
-        log_error(&format!("[视频] {}", msg));
+        log_error("[视频] 解析时长失败");
         msg
     })
 }
 
 /// 获取视频信息
 #[tauri::command]
-pub fn get_video_info(app: AppHandle, path: String) -> Result<VideoInfo, String> {
-    let ffprobe = get_ffprobe_path(&app);
-    let duration = get_video_duration(app, path.clone())?;
+pub async fn get_video_info(app: AppHandle, path: String) -> Result<VideoInfo, String> {
+    tokio::task::spawn_blocking(move || get_video_info_inner(&app, &path))
+        .await
+        .map_err(|error| format!("读取视频信息任务失败: {}", error))?
+}
+
+fn get_video_info_inner(app: &AppHandle, path: &str) -> Result<VideoInfo, String> {
+    validate_input_file(Path::new(path))?;
+    let ffprobe = get_ffprobe_path(app);
+    let duration = get_video_duration_inner(app, path)?;
 
     let output = Command::new(&ffprobe)
         .args([
@@ -354,7 +464,7 @@ pub fn get_video_info(app: AppHandle, path: String) -> Result<VideoInfo, String>
             "stream=width,height,avg_frame_rate,r_frame_rate",
             "-of",
             "csv=p=0",
-            &path,
+            path,
         ])
         .output()
         .map_err(|e| format!("执行 ffprobe 失败: {}", e))?;
@@ -435,6 +545,7 @@ pub struct BatchTrimResult {
     pub succeeded: usize,
     pub skipped: usize,
     pub failed: usize,
+    pub cancelled: bool,
     pub items: Vec<BatchTrimItemResult>,
 }
 
@@ -457,7 +568,10 @@ fn create_unique_output_path(
     output_dir: &Path,
     suffix: &str,
     precise_mode: bool,
-) -> PathBuf {
+) -> Result<PathBuf, String> {
+    if !output_dir.is_absolute() || !output_dir.is_dir() {
+        return Err("输出目录不存在或不可访问".into());
+    }
     let input_ext = normalize_video_extension(input);
     let output_ext = if precise_mode {
         preferred_precise_output_extension(&input_ext)
@@ -471,11 +585,7 @@ fn create_unique_output_path(
         .map(|value| value.to_string_lossy().to_string())
         .filter(|value| !value.is_empty())
         .unwrap_or_else(|| "video".into());
-    let sanitized_suffix = if suffix.trim().is_empty() {
-        "_trim".into()
-    } else {
-        suffix.trim().to_string()
-    };
+    let sanitized_suffix = suffix.trim();
 
     for index in 0..10_000 {
         let candidate_name = if index == 0 {
@@ -490,15 +600,32 @@ fn create_unique_output_path(
             )
         };
         let candidate = output_dir.join(candidate_name);
-        if candidate != input && !candidate.exists() {
-            return candidate;
+        if candidate.parent() != Some(output_dir) {
+            return Err("输出文件名不能离开所选目录".into());
+        }
+        if path_collision_key(&candidate) != path_collision_key(input)
+            && !path_entry_exists(&candidate)
+        {
+            return Ok(candidate);
         }
     }
 
-    output_dir.join(format!(
-        "{}{}_overflow.{}",
-        base_name, sanitized_suffix, output_ext
-    ))
+    Err("无法生成不冲突的输出文件名".into())
+}
+
+fn normalize_batch_output_suffix(suffix: Option<&str>) -> Result<String, String> {
+    let suffix = suffix.unwrap_or("_trim").trim();
+    let suffix = if suffix.is_empty() { "_trim" } else { suffix };
+    if suffix.chars().any(|character| {
+        character.is_control()
+            || matches!(
+                character,
+                '/' | '\\' | ':' | '*' | '?' | '"' | '<' | '>' | '|'
+            )
+    }) {
+        return Err("文件名后缀不能包含路径分隔符或系统保留字符".into());
+    }
+    Ok(suffix.to_string())
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -560,7 +687,7 @@ fn run_fast_cut(
     let use_faststart = output_needs_faststart(output);
 
     let mut args = vec![
-        "-y".to_string(),
+        "-n".to_string(),
         "-ss".to_string(),
         format!("{}", start_time),
         "-i".to_string(),
@@ -586,7 +713,7 @@ fn run_fast_cut(
 
     args.push(output.to_string());
 
-    let child = Command::new(&ffmpeg)
+    let mut child = Command::new(&ffmpeg)
         .args(&args)
         .stdout(Stdio::null())
         .stderr(Stdio::piped())
@@ -594,6 +721,12 @@ fn run_fast_cut(
         .map_err(|error| format!("启动 ffmpeg 失败: {}", error))?;
 
     let _process_tracker = process_slot.map(|slot| ProcessTracker::register(slot, child.id()));
+    if cancellation_requested(cancelled) {
+        let _ = child.kill();
+        let _ = child.wait();
+        let _ = std::fs::remove_file(output);
+        return Err("操作已取消".into());
+    }
     let result = child
         .wait_with_output()
         .map_err(|error| format!("等待 ffmpeg 失败: {}", error))?;
@@ -604,7 +737,7 @@ fn run_fast_cut(
     }
 
     if result.status.success() {
-        validate_fast_cut_duration(app, output, duration)
+        validate_fast_cut_duration(app, output, duration, process_slot, cancelled)
     } else {
         let _ = std::fs::remove_file(output);
         let stderr = String::from_utf8_lossy(&result.stderr).trim().to_string();
@@ -649,7 +782,7 @@ where
     let use_faststart = output_needs_faststart(output);
 
     let mut args = vec![
-        "-y".to_string(),
+        "-n".to_string(),
         "-i".to_string(),
         input.to_string(),
         "-ss".to_string(),
@@ -697,6 +830,12 @@ where
         .map_err(|error| format!("启动 ffmpeg 失败: {}", error))?;
 
     let _process_tracker = ProcessTracker::register(process_slot, child.id());
+    if cancelled.load(Ordering::SeqCst) {
+        let _ = child.kill();
+        let _ = child.wait();
+        let _ = std::fs::remove_file(output);
+        return Err("操作已取消".into());
+    }
 
     let cut_result = (|| -> Result<(), String> {
         let stdout = child
@@ -750,7 +889,13 @@ where
 }
 
 #[tauri::command]
-pub fn collect_batch_video_files(inputs: Vec<String>) -> Result<Vec<BatchVideoFile>, String> {
+pub async fn collect_batch_video_files(inputs: Vec<String>) -> Result<Vec<BatchVideoFile>, String> {
+    tokio::task::spawn_blocking(move || collect_batch_video_files_inner(inputs))
+        .await
+        .map_err(|error| format!("读取批量视频任务失败: {}", error))?
+}
+
+fn collect_batch_video_files_inner(inputs: Vec<String>) -> Result<Vec<BatchVideoFile>, String> {
     if inputs.is_empty() {
         return Ok(Vec::new());
     }
@@ -826,9 +971,19 @@ pub async fn batch_trim_videos(
         return Err("请先设定要删除的片头时长".into());
     }
 
-    let cancelled = register_batch_task(&task_id);
+    let suffix = normalize_batch_output_suffix(suffix.as_deref())?;
+    if matches!(output_mode, BatchVideoOutputMode::Directory) {
+        let directory = output_dir
+            .as_deref()
+            .map(Path::new)
+            .ok_or_else(|| "请先选择输出目录".to_string())?;
+        if !directory.is_absolute() || !directory.is_dir() {
+            return Err("输出目录不存在或不可访问".into());
+        }
+    }
+
+    let cancelled = register_batch_task(&task_id)?;
     let task_id_for_cleanup = task_id.clone();
-    let suffix = suffix.unwrap_or_else(|| "_trim".into());
 
     let task_result = tokio::task::spawn_blocking(move || {
         let total = paths.len();
@@ -836,6 +991,7 @@ pub async fn batch_trim_videos(
         let mut succeeded = 0usize;
         let mut skipped = 0usize;
         let mut failed = 0usize;
+        let mut was_cancelled = false;
         let mut items = Vec::with_capacity(total);
 
         emit_batch_progress(
@@ -853,7 +1009,8 @@ pub async fn batch_trim_videos(
 
         for (index, input_path) in paths.iter().enumerate() {
             if cancelled.load(Ordering::Relaxed) {
-                return Err("操作已取消".to_string());
+                was_cancelled = true;
+                break;
             }
 
             let current = index + 1;
@@ -876,7 +1033,12 @@ pub async fn batch_trim_videos(
                 failed,
             );
 
-            let duration = match get_video_duration(app.clone(), input_path.clone()) {
+            let duration = match get_video_duration_tracked(
+                &app,
+                input_path,
+                Some(&BATCH_VIDEO_FFMPEG_PROCESS),
+                Some(&cancelled),
+            ) {
                 Ok(duration) => duration,
                 Err(error) => {
                     failed += 1;
@@ -936,46 +1098,62 @@ pub async fn batch_trim_videos(
             };
 
             let output_path =
-                create_unique_output_path(&input, &output_parent, &suffix, precise_mode);
+                match create_unique_output_path(&input, &output_parent, &suffix, precise_mode) {
+                    Ok(path) => path,
+                    Err(error) => {
+                        failed += 1;
+                        items.push(BatchTrimItemResult {
+                            input_path: input_path.clone(),
+                            output_path: None,
+                            status: "failed".into(),
+                            message: error,
+                        });
+                        continue;
+                    }
+                };
             let output_string = output_path.to_string_lossy().to_string();
+            let result = TemporaryOutput::new(&output_path).and_then(|temporary_output| {
+                let temporary_output_string = temporary_output.path().to_string_lossy().to_string();
+                let processing_result = if precise_mode {
+                    run_precise_cut(
+                        &app,
+                        PreciseCutRequest {
+                            input: input_path,
+                            output: &temporary_output_string,
+                            start_time: trim_start,
+                            end_time: duration,
+                        },
+                        &BATCH_VIDEO_FFMPEG_PROCESS,
+                        &cancelled,
+                        |item_progress| {
+                            emit_batch_progress(
+                                &app,
+                                &task_id,
+                                "处理中",
+                                current,
+                                total,
+                                current_name.clone(),
+                                item_progress,
+                                succeeded,
+                                skipped,
+                                failed,
+                            );
+                        },
+                    )
+                } else {
+                    run_fast_cut(
+                        &app,
+                        input_path,
+                        &temporary_output_string,
+                        trim_start,
+                        duration,
+                        Some(&BATCH_VIDEO_FFMPEG_PROCESS),
+                        Some(&cancelled),
+                    )
+                };
 
-            let result = if precise_mode {
-                run_precise_cut(
-                    &app,
-                    PreciseCutRequest {
-                        input: input_path,
-                        output: &output_string,
-                        start_time: trim_start,
-                        end_time: duration,
-                    },
-                    &BATCH_VIDEO_FFMPEG_PROCESS,
-                    &cancelled,
-                    |item_progress| {
-                        emit_batch_progress(
-                            &app,
-                            &task_id,
-                            "处理中",
-                            current,
-                            total,
-                            current_name.clone(),
-                            item_progress,
-                            succeeded,
-                            skipped,
-                            failed,
-                        );
-                    },
-                )
-            } else {
-                run_fast_cut(
-                    &app,
-                    input_path,
-                    &output_string,
-                    trim_start,
-                    duration,
-                    Some(&BATCH_VIDEO_FFMPEG_PROCESS),
-                    Some(&cancelled),
-                )
-            };
+                processing_result.and_then(|()| temporary_output.commit(&output_path))
+            });
 
             match result {
                 Ok(()) => {
@@ -988,13 +1166,14 @@ pub async fn batch_trim_videos(
                     });
                 }
                 Err(error) if error.contains("取消") => {
-                    return Err("操作已取消".into());
+                    was_cancelled = true;
+                    break;
                 }
                 Err(error) => {
                     failed += 1;
                     items.push(BatchTrimItemResult {
                         input_path: input_path.clone(),
-                        output_path: Some(output_string),
+                        output_path: None,
                         status: "failed".into(),
                         message: error,
                     });
@@ -1015,14 +1194,15 @@ pub async fn batch_trim_videos(
             );
         }
 
+        let completed = items.len();
         emit_batch_progress(
             &app,
             &task_id,
-            "完成",
-            total,
+            if was_cancelled { "已取消" } else { "完成" },
+            completed,
             total,
             "".into(),
-            100.0,
+            if completed == 0 { 0.0 } else { 100.0 },
             succeeded,
             skipped,
             failed,
@@ -1033,6 +1213,7 @@ pub async fn batch_trim_videos(
             succeeded,
             skipped,
             failed,
+            cancelled: was_cancelled,
             items,
         })
     })
@@ -1045,196 +1226,138 @@ pub async fn batch_trim_videos(
 
 /// 截取视频（快速模式）
 #[tauri::command]
-pub fn cut_video(
+pub async fn cut_video(
     app: AppHandle,
+    task_id: String,
     input: String,
     output: String,
     start_time: f64,
     end_time: f64,
 ) -> Result<String, String> {
+    let (_task_guard, cancelled) = register_video_task(&task_id)?;
     if end_time <= start_time {
         return Err("结束时间必须大于开始时间".into());
     }
 
-    VIDEO_CANCELLED.store(false, Ordering::SeqCst);
-
+    let input_path = PathBuf::from(&input);
+    let output_path = PathBuf::from(&output);
+    validate_input_file(&input_path)?;
+    validate_output_path(&output_path)?;
+    if path_entry_exists(&output_path) {
+        return Err("目标文件已存在，请选择新的文件名".into());
+    }
     let duration = end_time - start_time;
     info!(
-        "[截取] 快速模式: {} -> {}, {:.2}s - {:.2}s (时长 {:.2}s)",
-        input, output, start_time, end_time, duration
+        "[截取] 快速模式: {:.2}s - {:.2}s (时长 {:.2}s)",
+        start_time, end_time, duration
     );
 
-    run_fast_cut(
-        &app,
-        &input,
-        &output,
-        start_time,
-        end_time,
-        Some(&VIDEO_FFMPEG_PROCESS),
-        Some(&VIDEO_CANCELLED),
-    )?;
+    let output_for_result = output_path.clone();
+    tokio::task::spawn_blocking(move || {
+        let temporary_output = TemporaryOutput::new(&output_path)?;
+        let temporary_output_string = temporary_output.path().to_string_lossy().to_string();
+        run_fast_cut(
+            &app,
+            &input,
+            &temporary_output_string,
+            start_time,
+            end_time,
+            Some(&VIDEO_FFMPEG_PROCESS),
+            Some(&cancelled),
+        )?;
+        if cancelled.load(Ordering::SeqCst) {
+            return Err("操作已取消".into());
+        }
+        temporary_output.commit(&output_path)
+    })
+    .await
+    .map_err(|error| format!("截取任务执行失败: {}", error))??;
 
-    info!("[截取] 快速模式完成: {}", output);
-    Ok(output)
+    info!("[截取] 快速模式完成");
+    Ok(output_for_result.to_string_lossy().to_string())
 }
 
 /// 精确截取视频（重新编码，带进度反馈）
 #[tauri::command]
 pub async fn cut_video_precise(
     app: AppHandle,
+    task_id: String,
     input: String,
     output: String,
     start_time: f64,
     end_time: f64,
 ) -> Result<String, String> {
+    let (_task_guard, cancelled) = register_video_task(&task_id)?;
     if end_time <= start_time {
         return Err("结束时间必须大于开始时间".into());
     }
 
-    VIDEO_CANCELLED.store(false, Ordering::SeqCst);
-
-    let ffmpeg = get_ffmpeg_path(&app);
+    let input_path = PathBuf::from(&input);
+    let output_path = PathBuf::from(&output);
+    validate_input_file(&input_path)?;
+    validate_output_path(&output_path)?;
+    if path_entry_exists(&output_path) {
+        return Err("目标文件已存在，请选择新的文件名".into());
+    }
     let duration = end_time - start_time;
     info!(
-        "[截取] 精确模式: {} -> {}, {:.2}s - {:.2}s (时长 {:.2}s)",
-        input, output, start_time, end_time, duration
+        "[截取] 精确模式: {:.2}s - {:.2}s (时长 {:.2}s)",
+        start_time, end_time, duration
     );
 
-    let output_clone = output.clone();
-    let output_for_cleanup = output.clone();
-    let cancelled = VIDEO_CANCELLED.clone();
-    let use_faststart = output_needs_faststart(&output);
-
-    let result = tokio::task::spawn_blocking(move || {
-        let mut args = vec![
-            "-y".to_string(),
-            "-i".to_string(),
-            input,
-            "-ss".to_string(),
-            format!("{}", start_time),
-            "-t".to_string(),
-            format!("{}", duration),
-            "-map".to_string(),
-            "0:v:0".to_string(),
-            "-map".to_string(),
-            "0:a?".to_string(),
-            "-map_metadata".to_string(),
-            "0".to_string(),
-            "-c:v".to_string(),
-            "libx264".to_string(),
-            "-crf".to_string(),
-            "23".to_string(),
-            "-preset".to_string(),
-            "veryfast".to_string(),
-            "-pix_fmt".to_string(),
-            "yuv420p".to_string(),
-            "-c:a".to_string(),
-            "aac".to_string(),
-            "-b:a".to_string(),
-            "128k".to_string(),
-            "-avoid_negative_ts".to_string(),
-            "make_zero".to_string(),
-        ];
-
-        if use_faststart {
-            args.push("-movflags".to_string());
-            args.push("+faststart".to_string());
+    let progress_task_id = task_id.clone();
+    let output_for_result = output_path.clone();
+    tokio::task::spawn_blocking(move || {
+        let temporary_output = TemporaryOutput::new(&output_path)?;
+        let temporary_output_string = temporary_output.path().to_string_lossy().to_string();
+        run_precise_cut(
+            &app,
+            PreciseCutRequest {
+                input: &input,
+                output: &temporary_output_string,
+                start_time,
+                end_time,
+            },
+            &VIDEO_FFMPEG_PROCESS,
+            &cancelled,
+            |progress| {
+                let _ = app.emit(
+                    "video-progress",
+                    VideoProgress {
+                        task_id: progress_task_id.clone(),
+                        percent: progress,
+                    },
+                );
+            },
+        )?;
+        if cancelled.load(Ordering::SeqCst) {
+            return Err("操作已取消".into());
         }
-
-        args.extend([
-            "-progress".to_string(),
-            "pipe:1".to_string(),
-            output_clone.clone(),
-        ]);
-
-        let mut child = Command::new(&ffmpeg)
-            .args(&args)
-            .stdout(Stdio::piped())
-            .stderr(Stdio::null())
-            .spawn()
-            .map_err(|e| format!("启动 ffmpeg 失败: {}", e))?;
-
-        let _process_tracker = ProcessTracker::register(&VIDEO_FFMPEG_PROCESS, child.id());
-
-        let cut_result = (|| -> Result<bool, String> {
-            let stdout = child
-                .stdout
-                .take()
-                .ok_or_else(|| "无法读取 ffmpeg 输出".to_string())?;
-            let reader = BufReader::new(stdout);
-
-            for line in reader.lines().map_while(Result::ok) {
-                if cancelled.load(Ordering::SeqCst) {
-                    info!("[截取] 用户取消操作，终止 FFmpeg 进程");
-                    let _ = child.kill();
-                    break;
-                }
-
-                if let Some(time_str) = line.strip_prefix("out_time_ms=") {
-                    if let Ok(ms) = time_str.parse::<i64>() {
-                        let current = ms as f64 / 1_000_000.0;
-                        let progress = progress_percent(current, duration);
-                        let _ = app.emit("video-progress", progress);
-                    }
-                } else if let Some(time_str) = line.strip_prefix("out_time_us=") {
-                    if let Ok(us) = time_str.parse::<i64>() {
-                        let current = us as f64 / 1_000_000.0;
-                        let progress = progress_percent(current, duration);
-                        let _ = app.emit("video-progress", progress);
-                    }
-                } else if let Some(time_str) = line.strip_prefix("out_time=") {
-                    if let Some(secs) = parse_ffmpeg_time(time_str) {
-                        let progress = progress_percent(secs, duration);
-                        let _ = app.emit("video-progress", progress);
-                    }
-                }
-            }
-
-            let status = child
-                .wait()
-                .map_err(|e| format!("等待 ffmpeg 失败: {}", e))?;
-
-            if cancelled.load(Ordering::SeqCst) {
-                let _ = std::fs::remove_file(&output_clone);
-                return Err("操作已取消".to_string());
-            }
-
-            if !status.success() {
-                let _ = std::fs::remove_file(&output_clone);
-                return Err("视频截取失败".into());
-            }
-
-            let _ = app.emit("video-progress", 100.0);
-            Ok(true)
-        })();
-
-        cut_result
+        temporary_output.commit(&output_path)
     })
     .await
-    .map_err(|e| format!("任务执行失败: {}", e))??;
+    .map_err(|error| format!("截取任务执行失败: {}", error))??;
 
-    if result {
-        info!("[截取] 精确模式完成: {}", output);
-        Ok(output)
-    } else {
-        let _ = std::fs::remove_file(&output_for_cleanup);
-        Err("视频截取失败".into())
-    }
+    info!("[截取] 精确模式完成");
+    Ok(output_for_result.to_string_lossy().to_string())
 }
 
 /// 取消视频截取操作
 #[tauri::command]
-pub fn cancel_video_cut() {
+pub fn cancel_video_cut(task_id: String) {
+    if !mark_video_task_cancelled(&task_id) {
+        return;
+    }
     info!("[截取] 收到取消请求");
-    VIDEO_CANCELLED.store(true, Ordering::SeqCst);
-
     kill_tracked_process(&VIDEO_FFMPEG_PROCESS);
 }
 
 #[tauri::command]
 pub fn cancel_batch_video_trim(task_id: String) {
+    if !mark_batch_task_cancelled(&task_id) {
+        return;
+    }
     info!("[批量去头] 收到取消请求: {}", task_id);
-    mark_batch_task_cancelled(&task_id);
 
     kill_tracked_process(&BATCH_VIDEO_FFMPEG_PROCESS);
 }
@@ -1300,8 +1423,9 @@ mod tests {
         std::fs::write(temp_dir.path().join("note.txt"), b"text")
             .expect("failed to write text file");
 
-        let result = collect_batch_video_files(vec![temp_dir.path().to_string_lossy().to_string()])
-            .expect("collect should succeed");
+        let result =
+            collect_batch_video_files_inner(vec![temp_dir.path().to_string_lossy().to_string()])
+                .expect("collect should succeed");
 
         assert_eq!(result.len(), 2);
         assert!(result.iter().any(|item| item.name == "a.mp4"));
@@ -1316,7 +1440,8 @@ mod tests {
         std::fs::write(&input, b"video").expect("failed to write input");
         std::fs::write(&existing_output, b"video").expect("failed to write existing output");
 
-        let output = create_unique_output_path(&input, temp_dir.path(), "_trim", false);
+        let output = create_unique_output_path(&input, temp_dir.path(), "_trim", false)
+            .expect("output path should be available");
 
         assert_ne!(output, input);
         assert_ne!(output, existing_output);

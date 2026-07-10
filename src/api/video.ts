@@ -38,6 +38,7 @@ export interface BatchTrimResult {
   succeeded: number;
   skipped: number;
   failed: number;
+  cancelled: boolean;
   items: BatchTrimItemResult[];
 }
 
@@ -58,6 +59,7 @@ export function generateTimelineFrames(path: string, count: number) {
 }
 
 export interface CutVideoRequest {
+  taskId: string;
   input: string;
   output: string;
   startTime: number;
@@ -66,17 +68,28 @@ export interface CutVideoRequest {
 }
 
 export function cutVideo({ precise, ...request }: CutVideoRequest) {
-  return invoke<void>(precise ? "cut_video_precise" : "cut_video", request);
+  return invoke<string>(precise ? "cut_video_precise" : "cut_video", request);
 }
 
-export function cancelVideoCut() {
-  return invoke<void>("cancel_video_cut");
+export interface VideoProgress {
+  task_id: string;
+  percent: number;
+}
+
+export function cancelVideoCut(taskId: string) {
+  return invoke<void>("cancel_video_cut", { taskId });
 }
 
 export type VideoConvertFormat = "mp4" | "mov" | "gif";
 export type VideoConvertQuality = "high" | "medium" | "low";
 
+export interface ConvertProgress {
+  task_id: string;
+  percent: number;
+}
+
 export interface ConvertVideoRequest {
+  taskId: string;
   input: string;
   output: string;
   format: VideoConvertFormat;
@@ -88,11 +101,11 @@ export function getFileSize(path: string) {
 }
 
 export function convertVideo(request: ConvertVideoRequest) {
-  return invoke<void>("convert_video", { ...request });
+  return invoke<string>("convert_video", { ...request });
 }
 
-export function cancelConvert() {
-  return invoke<void>("cancel_convert");
+export function cancelConvert(taskId: string) {
+  return invoke<void>("cancel_convert", { taskId });
 }
 
 export type BatchTrimOutputMode = "source" | "directory";

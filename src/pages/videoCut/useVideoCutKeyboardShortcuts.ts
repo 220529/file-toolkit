@@ -6,7 +6,6 @@ interface UseVideoCutKeyboardShortcutsOptions {
   active: boolean;
   videoInfo: VideoInfo | null;
   processing: boolean;
-  preciseMode: boolean;
   previewStrategy: "video" | "image";
   previewReady: boolean;
   previewVideoRef: RefObject<HTMLVideoElement | null>;
@@ -31,7 +30,6 @@ export function useVideoCutKeyboardShortcuts({
   active,
   videoInfo,
   processing,
-  preciseMode,
   previewStrategy,
   previewReady,
   previewVideoRef,
@@ -56,7 +54,7 @@ export function useVideoCutKeyboardShortcuts({
 
     function handleKeyDown(event: KeyboardEvent) {
       if (processing) {
-        if (preciseMode && event.key === "Escape") {
+        if (event.key === "Escape") {
           event.preventDefault();
           void onCancelCut();
         }
@@ -219,7 +217,6 @@ export function useVideoCutKeyboardShortcuts({
     onSyncPreviewTime,
     onToggleClipPlayback,
     onToggleLoopClipPlayback,
-    preciseMode,
     previewReady,
     previewStrategy,
     previewVideoRef,

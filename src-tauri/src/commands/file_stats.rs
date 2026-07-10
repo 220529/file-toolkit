@@ -35,12 +35,10 @@ fn cleanup_task(task_id: &str) {
 }
 
 fn mark_task_cancelled(task_id: &str) {
-    let mut tasks = lock_cancelled_tasks();
-    let cancelled = tasks
-        .entry(task_id.to_string())
-        .or_insert_with(|| Arc::new(AtomicBool::new(false)))
-        .clone();
-    cancelled.store(true, Ordering::Relaxed);
+    let tasks = lock_cancelled_tasks();
+    if let Some(cancelled) = tasks.get(task_id) {
+        cancelled.store(true, Ordering::Relaxed);
+    }
 }
 
 fn get_file_size(metadata: &Metadata) -> u64 {

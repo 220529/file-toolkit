@@ -4,7 +4,6 @@ import { Button } from "../../components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "../../components/ui/card";
 import { Checkbox } from "../../components/ui/checkbox";
 import { Progress } from "../../components/ui/progress";
-import { Switch } from "../../components/ui/switch";
 import { formatSize } from "../../utils/format";
 import {
   getStepProgress,
@@ -160,36 +159,23 @@ export function DedupActionsCard({
   onAutoSelect,
   onDeleteSelected,
   onUseTrashChange,
-  onVerifyBeforeDeleteChange,
   selectedCount,
   useTrash,
-  verifyBeforeDelete,
 }: {
   busy?: boolean;
   deleteFailures: DeleteFailure[];
   onAutoSelect: () => void;
   onDeleteSelected: () => void;
   onUseTrashChange: (value: boolean) => void;
-  onVerifyBeforeDeleteChange: (value: boolean) => void;
   selectedCount: number;
   useTrash: boolean;
-  verifyBeforeDelete: boolean;
 }) {
   return (
     <Card className="overflow-hidden">
       <CardHeader className="flex-col bg-white md:flex-row md:items-center">
         <div className="min-w-0 flex-1">
           <CardTitle>清理操作</CardTitle>
-          <div
-            className="mt-1 text-sm text-[var(--text-muted)]"
-            title={
-              verifyBeforeDelete
-                ? "当前已开启删除前完整校验，只删除与保留文件完全一致的副本。"
-                : "当前默认直接删除，速度更快；如需更稳妥，可开启删除前完整校验。"
-            }
-          >
-            {verifyBeforeDelete ? "删除前会先做完整校验。" : "默认直接删除，速度更快。"}
-          </div>
+          <div className="mt-1 text-sm text-[var(--text-muted)]">每组至少保留一份，删除前重新确认内容。</div>
           {busy && <div className="mt-1 text-xs text-[var(--text-muted)]">当前任务处理中，已锁定选择和删除操作。</div>}
         </div>
         <div className="flex w-full flex-col gap-3 md:w-auto md:flex-row md:flex-wrap md:items-center md:justify-end">
@@ -198,10 +184,7 @@ export function DedupActionsCard({
               <Checkbox checked={useTrash} disabled={busy} onCheckedChange={(checked) => onUseTrashChange(checked === true)} />
               移到回收站
             </label>
-            <label className="flex items-center gap-2 rounded-[8px] border border-[var(--stroke)] bg-[#f7f8f5] px-3 py-2 text-sm text-[var(--text-muted)]">
-              <Switch checked={verifyBeforeDelete} disabled={busy} onCheckedChange={onVerifyBeforeDeleteChange} />
-              删除前完整校验
-            </label>
+            <Badge tone="success">完整校验已开启</Badge>
           </div>
           <div className="flex flex-wrap items-center gap-2">
             <Button variant="secondary" onClick={onAutoSelect} disabled={busy}>

@@ -2,8 +2,10 @@ import { invoke, transformCallback } from "@tauri-apps/api/core";
 import type { EventCallback, EventName, Options } from "@tauri-apps/api/event";
 import type {
   BatchTrimProgress,
+  ConvertProgress,
   DedupProgress,
   FileStatsProgress,
+  VideoProgress,
   WatermarkBatchProgress,
 } from "../api/tauri";
 
@@ -17,13 +19,13 @@ export interface DragDropPayload {
 
 export interface TauriEventMap {
   "batch-video-progress": BatchTrimProgress;
-  "convert-progress": number;
+  "convert-progress": ConvertProgress;
   "dedup-progress": DedupProgress;
   "file-stats-progress": FileStatsProgress;
   "tauri://drag-drop": DragDropPayload;
   "tauri://drag-enter": DragDropPayload;
   "tauri://drag-leave": unknown;
-  "video-progress": number;
+  "video-progress": VideoProgress;
   "watermark-progress": WatermarkBatchProgress;
 }
 

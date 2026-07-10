@@ -1,5 +1,6 @@
 use std::collections::VecDeque;
 use std::path::Path;
+use std::sync::atomic::{AtomicBool, Ordering};
 use tauri::AppHandle;
 
 use super::super::logger::log_info;
@@ -490,11 +491,22 @@ pub(super) fn should_use_gradient_repair(
     boundary_color_stddev(pixels, mask, image_width, image_height) <= SMOOTH_BORDER_MAX_STDDEV
 }
 
+#[cfg(test)]
 pub(super) fn repair_mask_with_gradient_fill(
     pixels: &mut [u8],
     mask: &[u8],
     image_width: u32,
     image_height: u32,
+) -> Result<(), String> {
+    repair_mask_with_gradient_fill_cancellable(pixels, mask, image_width, image_height, None)
+}
+
+fn repair_mask_with_gradient_fill_cancellable(
+    pixels: &mut [u8],
+    mask: &[u8],
+    image_width: u32,
+    image_height: u32,
+    cancelled: Option<&AtomicBool>,
 ) -> Result<(), String> {
     let boundary = collect_boundary_pixels(mask, image_width, image_height);
     if boundary.is_empty() {
@@ -522,6 +534,7 @@ pub(super) fn repair_mask_with_gradient_fill(
     let mut masked_pixels = Vec::new();
 
     for y in 0..image_height {
+        ensure_repair_not_cancelled(cancelled)?;
         for x in 0..image_width {
             let index = y as usize * image_width as usize + x as usize;
             if mask[index] > 0 {
@@ -537,6 +550,7 @@ pub(super) fn repair_mask_with_gradient_fill(
     }
 
     for _ in 0..GRADIENT_REPAIR_ITERATIONS {
+        ensure_repair_not_cancelled(cancelled)?;
         let mut max_delta = 0_u32;
 
         for (x, y) in &masked_pixels {
@@ -592,11 +606,22 @@ pub(super) fn repair_mask_with_gradient_fill(
     Ok(())
 }
 
+#[cfg(test)]
 pub(super) fn repair_mask_with_texture_fill(
     pixels: &mut [u8],
     mask: &[u8],
     image_width: u32,
     image_height: u32,
+) -> Result<(), String> {
+    repair_mask_with_texture_fill_cancellable(pixels, mask, image_width, image_height, None)
+}
+
+fn repair_mask_with_texture_fill_cancellable(
+    pixels: &mut [u8],
+    mask: &[u8],
+    image_width: u32,
+    image_height: u32,
+    cancelled: Option<&AtomicBool>,
 ) -> Result<(), String> {
     if mask.len() != image_width as usize * image_height as usize {
         return Err("修复蒙版尺寸与图片不匹配".to_string());
@@ -607,6 +632,7 @@ pub(super) fn repair_mask_with_texture_fill(
     let mut queue = VecDeque::new();
 
     for y in 0..image_height {
+        ensure_repair_not_cancelled(cancelled)?;
         for x in 0..image_width {
             let index = y as usize * image_width as usize + x as usize;
             if !known[index] && has_known_neighbor(&known, image_width, image_height, x, y) {
@@ -616,7 +642,12 @@ pub(super) fn repair_mask_with_texture_fill(
         }
     }
 
+    let mut processed = 0usize;
     while let Some((x, y)) = queue.pop_front() {
+        processed += 1;
+        if processed.is_multiple_of(1024) {
+            ensure_repair_not_cancelled(cancelled)?;
+        }
         let index = y as usize * image_width as usize + x as usize;
         queued[index] = false;
 
@@ -661,6 +692,7 @@ pub(super) fn repair_mask_with_texture_fill(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(super) fn run_texture_repair(
     app: &AppHandle,
     pixels: &mut [u8],
@@ -669,15 +701,31 @@ pub(super) fn run_texture_repair(
     image_width: u32,
     image_height: u32,
     process_slot: Option<&ProcessSlot>,
+    cancelled: Option<&AtomicBool>,
 ) -> Result<(), String> {
+    ensure_repair_not_cancelled(cancelled)?;
     if should_use_gradient_repair(pixels, mask, image_width, image_height) {
         log_info("[去水印] repair 使用平滑背景重建");
-        repair_mask_with_gradient_fill(pixels, mask, image_width, image_height)?;
+        repair_mask_with_gradient_fill_cancellable(
+            pixels,
+            mask,
+            image_width,
+            image_height,
+            cancelled,
+        )?;
     } else {
         log_info("[去水印] repair 使用纹理修补算法");
-        repair_mask_with_texture_fill(pixels, mask, image_width, image_height)?;
+        repair_mask_with_texture_fill_cancellable(
+            pixels,
+            mask,
+            image_width,
+            image_height,
+            cancelled,
+        )?;
     }
+    ensure_repair_not_cancelled(cancelled)?;
     soften_repair_edges(pixels, mask, image_width, image_height);
+    ensure_repair_not_cancelled(cancelled)?;
     encode_image_rgba(
         app,
         pixels,
@@ -685,5 +733,17 @@ pub(super) fn run_texture_repair(
         image_height,
         output_path,
         process_slot,
+        cancelled,
     )
+}
+
+fn ensure_repair_not_cancelled(cancelled: Option<&AtomicBool>) -> Result<(), String> {
+    if cancelled
+        .map(|flag| flag.load(Ordering::SeqCst))
+        .unwrap_or(false)
+    {
+        Err("操作已取消".into())
+    } else {
+        Ok(())
+    }
 }

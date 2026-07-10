@@ -27,12 +27,14 @@ pub(super) fn lock_cancelled_tasks(
         .unwrap_or_else(|poisoned| poisoned.into_inner())
 }
 
-pub(super) fn register_batch_task(task_id: &str) -> Arc<AtomicBool> {
+pub(super) fn register_batch_task(task_id: &str) -> Result<Arc<AtomicBool>, String> {
     let mut tasks = lock_cancelled_tasks();
-    tasks
-        .entry(task_id.to_string())
-        .or_insert_with(|| Arc::new(AtomicBool::new(false)))
-        .clone()
+    if !tasks.is_empty() {
+        return Err("已有批量水印任务正在运行".into());
+    }
+    let cancelled = Arc::new(AtomicBool::new(false));
+    tasks.insert(task_id.to_string(), cancelled.clone());
+    Ok(cancelled)
 }
 
 pub(super) fn cleanup_batch_task(task_id: &str) {
@@ -40,13 +42,13 @@ pub(super) fn cleanup_batch_task(task_id: &str) {
     tasks.remove(task_id);
 }
 
-pub(super) fn mark_batch_task_cancelled(task_id: &str) {
-    let mut tasks = lock_cancelled_tasks();
-    let cancelled = tasks
-        .entry(task_id.to_string())
-        .or_insert_with(|| Arc::new(AtomicBool::new(false)))
-        .clone();
+pub(super) fn mark_batch_task_cancelled(task_id: &str) -> bool {
+    let tasks = lock_cancelled_tasks();
+    let Some(cancelled) = tasks.get(task_id) else {
+        return false;
+    };
     cancelled.store(true, Ordering::SeqCst);
+    true
 }
 
 pub(super) fn ensure_not_cancelled(cancelled: Option<&AtomicBool>) -> Result<(), String> {

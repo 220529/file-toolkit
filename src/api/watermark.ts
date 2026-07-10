@@ -13,6 +13,11 @@ export interface WatermarkResult {
   message: string;
 }
 
+export interface WatermarkBatchResult {
+  cancelled: boolean;
+  items: WatermarkResult[];
+}
+
 export interface WatermarkBatchProgress {
   task_id: string;
   stage: string;
@@ -69,7 +74,7 @@ export function removeWatermark(request: RemoveWatermarkRequest) {
 }
 
 export function batchRemoveWatermark(request: BatchRemoveWatermarkRequest) {
-  return invoke<WatermarkResult[]>("batch_remove_watermark", { ...request });
+  return invoke<WatermarkBatchResult>("batch_remove_watermark", { ...request });
 }
 
 export function cancelWatermarkTask(taskId: string) {

@@ -31,3 +31,11 @@ export function getExtension(path: string): string {
   const index = baseName.lastIndexOf(".");
   return index > 0 ? baseName.slice(index + 1) : "";
 }
+
+export function fileSystemCollisionKey(path: string): string {
+  const normalized = path.replace(/\\/g, "/");
+  if (typeof navigator === "undefined") return normalized;
+
+  const platform = `${navigator.platform || ""} ${navigator.userAgent || ""}`;
+  return /mac|win/i.test(platform) ? normalized.toLocaleLowerCase() : normalized;
+}

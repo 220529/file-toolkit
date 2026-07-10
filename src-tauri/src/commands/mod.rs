@@ -1,6 +1,7 @@
 pub mod convert;
 pub mod dedup;
 pub mod ffmpeg_utils;
+pub mod file_ops;
 pub mod file_stats;
 pub mod logger;
 pub mod organize;
