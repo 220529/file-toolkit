@@ -34,6 +34,7 @@ export interface DedupResult {
 export interface DedupProgress {
   task_id: string;
   stage: string;
+  detail?: string | null;
   current: number;
   total: number;
   percent: number;

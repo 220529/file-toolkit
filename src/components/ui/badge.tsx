@@ -4,11 +4,11 @@ import { cn } from "../../utils/cn";
 type BadgeTone = "default" | "info" | "success" | "warning" | "danger";
 
 const toneClasses: Record<BadgeTone, string> = {
-  default: "bg-slate-50 text-slate-700 ring-1 ring-slate-200",
-  info: "bg-blue-50 text-blue-700 ring-1 ring-blue-200/70",
-  success: "bg-emerald-50 text-emerald-700 ring-1 ring-emerald-200/70",
-  warning: "bg-amber-50 text-amber-700 ring-1 ring-amber-200/70",
-  danger: "bg-rose-50 text-rose-700 ring-1 ring-rose-200/70",
+  default: "bg-[#f1f3f1] text-[var(--text-muted)] ring-1 ring-[var(--stroke)]",
+  info: "bg-[var(--brand-50)] text-[var(--brand-700)] ring-1 ring-[rgba(47,125,189,0.22)]",
+  success: "bg-[#eaf7f2] text-[var(--success-600)] ring-1 ring-[rgba(24,116,86,0.18)]",
+  warning: "bg-[#fff4df] text-[var(--warning-600)] ring-1 ring-[rgba(177,106,37,0.18)]",
+  danger: "bg-[#fff0ef] text-[var(--danger-600)] ring-1 ring-[rgba(187,62,58,0.18)]",
 };
 
 interface BadgeProps extends HTMLAttributes<HTMLSpanElement> {

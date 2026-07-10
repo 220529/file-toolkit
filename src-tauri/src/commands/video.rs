@@ -23,6 +23,7 @@ lazy_static::lazy_static! {
 }
 
 const SUPPORTED_VIDEO_EXTENSIONS: [&str; 7] = ["mp4", "mov", "avi", "mkv", "wmv", "flv", "webm"];
+const FAST_CUT_DURATION_TOLERANCE_SECONDS: f64 = 0.75;
 
 fn lock_batch_cancelled_tasks() -> std::sync::MutexGuard<'static, HashMap<String, Arc<AtomicBool>>>
 {
@@ -128,6 +129,69 @@ fn progress_percent(current: f64, duration: f64) -> f64 {
     }
 
     (current / duration * 100.0).clamp(0.0, 100.0)
+}
+
+fn probe_output_duration(app: &AppHandle, path: &str) -> Result<f64, String> {
+    let ffprobe = get_ffprobe_path(app);
+    let output = Command::new(&ffprobe)
+        .args([
+            "-v",
+            "error",
+            "-show_entries",
+            "format=duration",
+            "-of",
+            "default=noprint_wrappers=1:nokey=1",
+            path,
+        ])
+        .output()
+        .map_err(|error| format!("执行 ffprobe 失败: {}", error))?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+        return Err(if stderr.is_empty() {
+            "读取输出视频时长失败".into()
+        } else {
+            format!("读取输出视频时长失败: {}", stderr)
+        });
+    }
+
+    let duration = String::from_utf8_lossy(&output.stdout)
+        .trim()
+        .parse::<f64>()
+        .map_err(|error| format!("解析输出视频时长失败: {}", error))?;
+
+    if duration.is_finite() && duration > 0.0 {
+        Ok(duration)
+    } else {
+        Err("输出视频时长无效".into())
+    }
+}
+
+fn validate_fast_cut_duration(
+    app: &AppHandle,
+    output: &str,
+    expected_duration: f64,
+) -> Result<(), String> {
+    let actual_duration = match probe_output_duration(app, output) {
+        Ok(duration) => duration,
+        Err(error) => {
+            let _ = std::fs::remove_file(output);
+            return Err(format!(
+                "{}。快速模式结果无法校验，请开启精确模式重新导出。",
+                error
+            ));
+        }
+    };
+    let tolerance = FAST_CUT_DURATION_TOLERANCE_SECONDS.max(expected_duration * 0.1);
+    if (actual_duration - expected_duration).abs() <= tolerance {
+        return Ok(());
+    }
+
+    let _ = std::fs::remove_file(output);
+    Err(format!(
+        "快速模式只能从关键帧附近无损截取，本次导出时长 {:.3}s，与目标时长 {:.3}s 偏差过大。请开启精确模式重新导出。",
+        actual_duration, expected_duration
+    ))
 }
 
 fn cancellation_requested(cancelled: Option<&AtomicBool>) -> bool {
@@ -540,7 +604,7 @@ fn run_fast_cut(
     }
 
     if result.status.success() {
-        Ok(())
+        validate_fast_cut_duration(app, output, duration)
     } else {
         let _ = std::fs::remove_file(output);
         let stderr = String::from_utf8_lossy(&result.stderr).trim().to_string();

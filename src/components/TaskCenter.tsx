@@ -24,14 +24,27 @@ export function TaskCenterProvider({ children }: { children: React.ReactNode }) 
   const [tasksMap, setTasksMap] = useState<Record<string, TaskItem>>({});
 
   const upsertTask = useCallback((task: TaskItem) => {
-    setTasksMap((prev) => ({
-      ...prev,
-      [task.id]: {
-        ...task,
-        startedAt: task.startedAt ?? prev[task.id]?.startedAt ?? Date.now(),
-        status: task.status ?? "running",
-      },
-    }));
+    setTasksMap((prev) => {
+      const previous = prev[task.id];
+      const previousProgress =
+        previous && previous.status === "running" && typeof previous.progress === "number"
+          ? previous.progress
+          : undefined;
+      const nextProgress =
+        typeof task.progress === "number" && typeof previousProgress === "number"
+          ? Math.max(previousProgress, task.progress)
+          : task.progress;
+
+      return {
+        ...prev,
+        [task.id]: {
+          ...task,
+          progress: nextProgress,
+          startedAt: task.startedAt ?? previous?.startedAt ?? Date.now(),
+          status: task.status ?? "running",
+        },
+      };
+    });
   }, []);
 
   const clearTask = useCallback((id: string) => {
@@ -119,37 +132,37 @@ export function TaskStatusBar() {
   if (tasks.length === 0) return null;
 
   return (
-    <div className="border-b border-slate-200 bg-slate-50 px-4 py-3">
+    <div className="border-b border-[var(--stroke)] bg-[#f7f8f5] px-5 py-3">
       <div className="flex flex-wrap gap-2">
         {tasks.map((task) => (
           <div
             key={task.id}
-            className="min-w-[240px] flex-1 rounded-[8px] border border-slate-200 bg-white px-4 py-3 shadow-[0_1px_2px_rgba(15,23,42,0.04)]"
+            className="min-w-[260px] flex-1 rounded-[8px] border border-[var(--stroke)] bg-white px-4 py-3 shadow-[0_1px_2px_rgba(16,20,23,0.04)]"
           >
             <div className="flex items-center justify-between gap-4">
               <div className="min-w-0">
-                <div className="text-sm font-semibold text-slate-900">{task.title}</div>
-                <div className="flex flex-wrap items-center gap-2 text-xs text-slate-500">
+                <div className="text-sm font-semibold text-[var(--text-strong)]">{task.title}</div>
+                <div className="flex flex-wrap items-center gap-2 text-xs text-[var(--text-muted)]">
                   <span className="truncate">{task.stage}</span>
                   {task.startedAt && (
-                    <span className="rounded-[5px] bg-slate-100 px-1.5 py-0.5 text-[10px] text-slate-500">
+                    <span className="rounded-[5px] bg-[#eef3f5] px-1.5 py-0.5 text-[10px] text-[var(--text-muted)]">
                       {formatElapsed(now - task.startedAt)}
                     </span>
                   )}
                 </div>
-                {task.detail && <div className="truncate text-xs text-slate-400">{task.detail}</div>}
+                {task.detail && <div className="truncate text-xs text-[var(--text-soft)]">{task.detail}</div>}
               </div>
               {task.cancellable && task.onCancel && (
                 <button
                   onClick={() => cancelTask(task)}
                   disabled={cancellingTaskIds.has(task.id)}
-                  className="rounded-[10px] border border-rose-100 bg-rose-50 px-3 py-1.5 text-xs font-medium text-rose-700 transition hover:border-rose-200 hover:bg-rose-100 disabled:cursor-not-allowed disabled:opacity-60"
+                  className="rounded-[8px] border border-[rgba(187,62,58,0.18)] bg-[#fff0ef] px-3 py-1.5 text-xs font-medium text-[var(--danger-600)] transition hover:border-[rgba(187,62,58,0.28)] hover:bg-[#ffe5e3] disabled:cursor-not-allowed disabled:opacity-60"
                 >
                   {cancellingTaskIds.has(task.id) ? "取消中" : "取消"}
                 </button>
               )}
             </div>
-            <div className="mt-2 h-1.5 overflow-hidden rounded-full bg-slate-200/80">
+            <div className="mt-2 h-1.5 overflow-hidden rounded-full bg-[#e3e8e8]">
               {typeof task.progress === "number" ? (
                 <div
                   className={`h-full rounded-full transition-all duration-300 ${getProgressTone(task.status)}`}

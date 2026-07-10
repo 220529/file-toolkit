@@ -27,29 +27,31 @@ export const DEDUP_STAGE_ORDER: Record<string, number> = {
 export const VIRTUAL_OVERSCAN = 900;
 
 export function estimateGroupHeight(group: DuplicateGroup, expanded: boolean) {
-  const base = 148;
+  const base = 108;
   if (!expanded) return base;
-  return base + group.files.length * 78 + 16;
+  return base + group.files.length * 72 + 14;
 }
 
 export function getDedupProgressText(progress: DedupProgress) {
+  const prefix = progress.detail ? `${progress.detail} · ` : "";
+
   switch (progress.stage) {
     case "准备扫描文件夹":
       return "准备中";
     case "扫描文件":
-      return `已扫描 ${progress.current.toLocaleString()} 个文件`;
+      return `${prefix}已扫描 ${progress.current.toLocaleString()} 个文件`;
     case "初步筛选重复文件":
       return progress.total > 0
-        ? `候选 ${progress.current.toLocaleString()} / ${progress.total.toLocaleString()}`
-        : "筛选中";
+        ? `${prefix}候选 ${progress.current.toLocaleString()} / ${progress.total.toLocaleString()}`
+        : `${prefix}筛选中`;
     case "确认重复文件":
       return progress.total > 0
-        ? `确认 ${progress.current.toLocaleString()} / ${progress.total.toLocaleString()}`
-        : "确认中";
+        ? `${prefix}确认 ${progress.current.toLocaleString()} / ${progress.total.toLocaleString()}`
+        : `${prefix}确认中`;
     default:
       return progress.total > 0
-        ? `${progress.current.toLocaleString()} / ${progress.total.toLocaleString()}`
-        : `${progress.current.toLocaleString()}`;
+        ? `${prefix}${progress.current.toLocaleString()} / ${progress.total.toLocaleString()}`
+        : `${prefix}${progress.current.toLocaleString()}`;
   }
 }
 

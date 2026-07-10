@@ -15,7 +15,7 @@ export function DropdownMenuContent({
       <DropdownMenuPrimitive.Content
         sideOffset={sideOffset}
         className={cn(
-          "z-50 min-w-[180px] rounded-[10px] border border-slate-200 bg-white p-1.5 text-slate-700 shadow-[0_12px_28px_rgba(15,23,42,0.12)] outline-none",
+          "z-50 min-w-[180px] rounded-[8px] border border-[var(--stroke)] bg-white p-1.5 text-[var(--text-strong)] shadow-[0_12px_28px_rgba(16,20,23,0.12)] outline-none",
           "data-[side=top]:animate-slide-in data-[side=bottom]:animate-slide-in",
           className
         )}
@@ -33,7 +33,7 @@ export function DropdownMenuItem({
     <DropdownMenuPrimitive.Item
       className={cn(
         "flex cursor-default select-none items-center gap-3 rounded-[8px] px-3 py-2.5 text-sm outline-none transition",
-        "focus:bg-slate-50 focus:text-slate-950 data-[disabled]:pointer-events-none data-[disabled]:opacity-50",
+        "focus:bg-[var(--brand-50)] focus:text-[var(--brand-700)] data-[disabled]:pointer-events-none data-[disabled]:opacity-50",
         className
       )}
       {...props}

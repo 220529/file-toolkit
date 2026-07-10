@@ -1,33 +1,35 @@
 @import "tailwindcss";
 
 :root {
-  --brand-50: #eff6ff;
-  --brand-100: #dbeafe;
-  --brand-300: #93c5fd;
-  --brand-400: #60a5fa;
-  --brand-500: #2563eb;
-  --brand-600: #1d4ed8;
-  --brand-700: #1e40af;
-  --accent-500: #0f766e;
-  --accent-600: #0f5f59;
-  --success-600: #047857;
-  --warning-600: #b45309;
-  --danger-500: #ef4444;
-  --danger-600: #dc2626;
+  --brand-50: #e6f4ff;
+  --brand-100: #bae0ff;
+  --brand-300: #69b1ff;
+  --brand-400: #4096ff;
+  --brand-500: #1677ff;
+  --brand-600: #0958d9;
+  --brand-700: #003eb3;
+  --accent-500: #52c41a;
+  --accent-600: #389e0d;
+  --success-600: #389e0d;
+  --warning-600: #d48806;
+  --danger-500: #ff4d4f;
+  --danger-600: #cf1322;
   --radius-sm: 6px;
   --radius-md: 8px;
-  --radius-lg: 10px;
+  --radius-lg: 8px;
   --surface: #ffffff;
   --surface-strong: #ffffff;
-  --canvas: #eef1f5;
-  --panel: #f5f6f8;
-  --stroke: rgba(100, 116, 139, 0.22);
-  --text-strong: #111827;
-  --text-muted: #64748b;
-  --nav-bg: #ffffff;
-  --nav-bg-raised: #ffffff;
-  --nav-stroke: rgba(100, 116, 139, 0.2);
-  --nav-muted: #7c8aa0;
+  --canvas: #f0f2f5;
+  --panel: #f5f5f5;
+  --stroke: #f0f0f0;
+  --stroke-strong: #d9d9d9;
+  --text-strong: #1f1f1f;
+  --text-muted: #595959;
+  --text-soft: #8c8c8c;
+  --nav-bg: #001529;
+  --nav-bg-raised: #0b2340;
+  --nav-stroke: rgba(255, 255, 255, 0.08);
+  --nav-muted: rgba(255, 255, 255, 0.45);
 }
 
 html,
@@ -39,7 +41,7 @@ body,
 
 body {
   margin: 0;
-  font-family: "SF Pro Text", "Segoe UI", "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", sans-serif;
+  font-family: Inter, "SF Pro Text", "Segoe UI", "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", sans-serif;
   font-size: 14px;
   color: var(--text-strong);
   background: var(--canvas);
@@ -59,12 +61,12 @@ button {
 }
 
 :focus-visible {
-  outline: 2px solid rgba(37, 109, 223, 0.42);
+  outline: 2px solid rgba(47, 125, 189, 0.46);
   outline-offset: 2px;
 }
 
 ::selection {
-  background: rgba(51, 109, 255, 0.16);
+  background: rgba(47, 125, 189, 0.18);
 }
 
 ::-webkit-scrollbar {
@@ -75,12 +77,38 @@ button {
 ::-webkit-scrollbar-thumb {
   border: 2px solid transparent;
   border-radius: 999px;
-  background: rgba(100, 116, 139, 0.42);
+  background: rgba(78, 92, 102, 0.34);
   background-clip: padding-box;
 }
 
 ::-webkit-scrollbar-track {
   background: transparent;
+}
+
+@media (max-width: 920px) {
+  .app-sidebar {
+    width: 56px !important;
+    padding-left: 8px !important;
+    padding-right: 8px !important;
+  }
+
+  .app-sidebar-brand {
+    justify-content: center;
+  }
+
+  .app-sidebar-brand-text,
+  .app-sidebar-section-title,
+  .app-sidebar-label,
+  .app-sidebar-more-label,
+  .app-sidebar-tools-label {
+    display: none !important;
+  }
+
+  .app-sidebar-item {
+    justify-content: center;
+    padding-left: 0 !important;
+    padding-right: 0 !important;
+  }
 }
 
 /* 按钮样式 */
@@ -147,26 +175,26 @@ button {
 .drop-zone {
   position: relative;
   overflow: hidden;
-  border: 1px dashed rgba(100, 116, 139, 0.38);
+  border: 1px dashed rgba(72, 89, 100, 0.34);
   border-radius: var(--radius-md);
-  min-height: 156px;
-  padding: 28px 20px;
+  min-height: 132px;
+  padding: 24px 20px;
   text-align: center;
   cursor: pointer;
   transition: border-color 0.2s ease, background 0.2s ease, box-shadow 0.2s ease, transform 0.2s ease;
-  background: #ffffff;
+  background: linear-gradient(180deg, #ffffff 0%, #fbfcfa 100%);
 }
 
 .drop-zone:hover {
-  border-color: rgba(37, 99, 235, 0.55);
-  background: #f8fafc;
-  box-shadow: inset 0 0 0 1px rgba(37, 99, 235, 0.08);
+  border-color: rgba(47, 125, 189, 0.55);
+  background: #ffffff;
+  box-shadow: inset 0 0 0 1px rgba(47, 125, 189, 0.08), 0 10px 28px rgba(16, 20, 23, 0.05);
 }
 
 .drop-zone.dragging {
-  border-color: rgba(15, 118, 110, 0.72);
-  background: #f0fdfa;
-  box-shadow: inset 0 0 0 1px rgba(15, 118, 110, 0.16);
+  border-color: rgba(22, 121, 111, 0.72);
+  background: #eef9f6;
+  box-shadow: inset 0 0 0 1px rgba(22, 121, 111, 0.16);
 }
 
 /* 表格样式 */
@@ -176,21 +204,21 @@ button {
 }
 
 .table th {
-  background: rgba(248, 250, 252, 0.9);
+  background: rgba(247, 248, 245, 0.95);
   padding: 12px 16px;
   text-align: left;
   font-weight: 500;
   color: var(--text-muted);
-  border-bottom: 1px solid rgba(226, 232, 240, 0.82);
+  border-bottom: 1px solid rgba(215, 220, 224, 0.88);
 }
 
 .table td {
   padding: 12px 16px;
-  border-bottom: 1px solid rgba(226, 232, 240, 0.74);
+  border-bottom: 1px solid rgba(215, 220, 224, 0.7);
 }
 
 .table tr:hover td {
-  background: rgba(248, 250, 252, 0.72);
+  background: rgba(247, 248, 245, 0.72);
 }
 
 /* 标签样式 */

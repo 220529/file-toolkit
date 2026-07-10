@@ -15,8 +15,6 @@ import { useFileActions } from "../hooks/useFileActions";
 import DropZone from "../components/DropZone";
 import { useTaskReporter } from "../components/TaskCenter";
 import { useToast } from "../components/Toast";
-import { Badge } from "../components/ui/badge";
-import { Button } from "../components/ui/button";
 import { EmptyState } from "../components/ui/empty-state";
 import { Icon } from "../components/ui/icon";
 import { safeListen } from "../utils/tauriEvent";
@@ -53,9 +51,10 @@ export default function Dedup({ active = true }: { active?: boolean }) {
   const [stepSnapshot, setStepSnapshot] = useState<DedupStepSnapshot>(createEmptyStepSnapshot);
   const [previewImage, setPreviewImage] = useState<string | null>(null);
   const [useTrash, setUseTrash] = useState(true);
-  const [scope, setScope] = useState<DedupScope>("all");
+  const [scope, setScope] = useState<DedupScope>("media");
   const [verifyBeforeDelete, setVerifyBeforeDelete] = useState(false);
   const [deleteFailures, setDeleteFailures] = useState<DeleteFailure[]>([]);
+  const [deleting, setDeleting] = useState(false);
   const currentTaskIdRef = useRef<string | null>(null);
   const itemHeightsRef = useRef<Map<string, number>>(new Map());
   const itemObserversRef = useRef<Map<string, ResizeObserver>>(new Map());
@@ -152,12 +151,12 @@ export default function Dedup({ active = true }: { active?: boolean }) {
             next.scannedFiles = Math.max(next.scannedFiles, event.payload.current);
             break;
           case "初步筛选重复文件":
-            next.sampleCurrent = Math.max(next.sampleCurrent, event.payload.current);
-            next.sampleTotal = Math.max(next.sampleTotal, event.payload.total);
+            next.sampleCurrent = event.payload.current;
+            next.sampleTotal = event.payload.total;
             break;
           case "确认重复文件":
-            next.confirmCurrent = Math.max(next.confirmCurrent, event.payload.current);
-            next.confirmTotal = Math.max(next.confirmTotal, event.payload.total);
+            next.confirmCurrent = event.payload.current;
+            next.confirmTotal = event.payload.total;
             break;
           default:
             break;
@@ -240,6 +239,7 @@ export default function Dedup({ active = true }: { active?: boolean }) {
     flushSync(() => {
       setSelectedPath(path);
       setLoading(true);
+      setDeleting(false);
       setResult(null);
       setSelected(new Set());
       setExpandedGroups(new Set());
@@ -280,6 +280,7 @@ export default function Dedup({ active = true }: { active?: boolean }) {
   }
 
   function toggleSelect(path: string) {
+    if (loading || deleting) return;
     setSelected((current) => {
       const next = new Set(current);
       if (next.has(path)) next.delete(path);
@@ -289,7 +290,7 @@ export default function Dedup({ active = true }: { active?: boolean }) {
   }
 
   function autoSelect() {
-    if (!result) return;
+    if (!result || loading || deleting) return;
     const toDelete = new Set<string>();
     result.groups.forEach((group) => {
       const sorted = getSortedFiles(group);
@@ -303,6 +304,7 @@ export default function Dedup({ active = true }: { active?: boolean }) {
   }
 
   function toggleGroup(hash: string) {
+    if (deleting) return;
     setExpandedGroups((current) => {
       const next = new Set(current);
       if (next.has(hash)) next.delete(hash);
@@ -312,7 +314,7 @@ export default function Dedup({ active = true }: { active?: boolean }) {
   }
 
   async function deleteSelected() {
-    if (selected.size === 0 || !result) return;
+    if (selected.size === 0 || !result || loading || deleting) return;
 
     const action = useTrash ? "移到回收站" : "永久删除";
     const confirmed = await confirm(
@@ -323,6 +325,7 @@ export default function Dedup({ active = true }: { active?: boolean }) {
     if (!confirmed) return;
 
     try {
+      setDeleting(true);
       const deleteResult = await deleteFiles({
         paths: Array.from(selected),
         useTrash,
@@ -385,6 +388,7 @@ export default function Dedup({ active = true }: { active?: boolean }) {
     } catch (e) {
       toast.error("删除失败: " + e);
     } finally {
+      setDeleting(false);
       setLoading(false);
       setProgress(null);
     }
@@ -530,27 +534,40 @@ export default function Dedup({ active = true }: { active?: boolean }) {
   }, [active, visibleGroups, groupThumbnails]);
 
   return (
-    <div className="space-y-6 p-6">
+    <div className="mx-auto max-w-[1360px] space-y-4 pb-4">
       <DropZone onSelect={handleSelect} loading={loading} selectedPath={selectedPath} active={active} />
 
-      <div className="flex items-center gap-3">
-        <Badge tone="default">去重范围</Badge>
-        <Button
-          variant={scope === "media" ? "primary" : "secondary"}
-          size="sm"
-          disabled={loading}
-          onClick={() => setScope("media")}
-        >
-          媒体
-        </Button>
-        <Button
-          variant={scope === "all" ? "primary" : "secondary"}
-          size="sm"
-          disabled={loading}
-          onClick={() => setScope("all")}
-        >
-          全部文件
-        </Button>
+      <div className="flex flex-col gap-3 rounded-[8px] border border-[var(--stroke)] bg-white px-4 py-3 shadow-[0_1px_2px_rgba(16,20,23,0.04)] md:flex-row md:items-center md:justify-between">
+        <div className="min-w-0">
+          <div className="text-sm font-semibold text-[var(--text-strong)]">去重范围</div>
+          <div className="mt-0.5 text-xs text-[var(--text-muted)]">媒体模式会优先过滤图片、视频、音频；全部文件会覆盖更多类型。</div>
+        </div>
+        <div className="flex w-full rounded-[8px] border border-[var(--stroke)] bg-[#f7f8f5] p-1 md:w-auto">
+          <button
+            type="button"
+            disabled={loading}
+            onClick={() => setScope("media")}
+            className={`flex-1 rounded-[7px] px-3 py-2 text-sm font-medium transition md:flex-none ${
+              scope === "media"
+                ? "bg-white text-[var(--brand-700)] shadow-[0_1px_4px_rgba(16,20,23,0.08)]"
+                : "text-[var(--text-muted)] hover:text-[var(--text-strong)]"
+            } disabled:cursor-not-allowed disabled:opacity-50`}
+          >
+            媒体
+          </button>
+          <button
+            type="button"
+            disabled={loading}
+            onClick={() => setScope("all")}
+            className={`flex-1 rounded-[7px] px-3 py-2 text-sm font-medium transition md:flex-none ${
+              scope === "all"
+                ? "bg-white text-[var(--brand-700)] shadow-[0_1px_4px_rgba(16,20,23,0.08)]"
+                : "text-[var(--text-muted)] hover:text-[var(--text-strong)]"
+            } disabled:cursor-not-allowed disabled:opacity-50`}
+          >
+            全部文件
+          </button>
+        </div>
       </div>
 
       {loading && progress && <DedupProgressCard progress={progress} stepSnapshot={stepSnapshot} />}
@@ -574,6 +591,7 @@ export default function Dedup({ active = true }: { active?: boolean }) {
               <DedupSummaryCard result={result} />
 
               <DedupActionsCard
+                busy={loading || deleting}
                 deleteFailures={deleteFailures}
                 onAutoSelect={autoSelect}
                 onDeleteSelected={() => void deleteSelected()}
@@ -598,6 +616,7 @@ export default function Dedup({ active = true }: { active?: boolean }) {
                 onToggleGroup={toggleGroup}
                 onToggleSelect={toggleSelect}
                 selected={selected}
+                selectionLocked={loading || deleting}
                 totalHeight={virtualState.totalHeight}
                 visibleItems={virtualState.visibleItems}
               />

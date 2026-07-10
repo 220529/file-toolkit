@@ -21,7 +21,7 @@ Remote:
 
 ## Decision
 
-Keep indexed but not adopted. README/AGENTS now document release, FFmpeg binary, Codex key, generated-output, and local data boundaries. Promote to product asset only after generated-output cleanup review, release ownership, signing/notarization, FFmpeg redistribution, and user-file privacy boundaries are accepted.
+Keep indexed but not adopted. README/AGENTS now document release, FFmpeg binary, generated-output, and local data boundaries. Promote to product asset only after generated-output cleanup review, release ownership, signing/notarization, FFmpeg redistribution, and user-file privacy boundaries are accepted.
 
 Project-level `.npmrc` points npm cache, pnpm store, and pnpm state to `/private/tmp` and disables pnpm self-managed version switching so dependency caches and pnpm tools do not become workspace assets or write into the user home directory.
 

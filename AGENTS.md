@@ -14,8 +14,8 @@
 - 不提交 `.env`、API key、cookie、完整连接串、私有日志、生产数据或用户文件样本。
 - 不把 `node_modules/`、`dist/`、`tmp/`、`src-tauri/target/`、`src-tauri/binaries/`、安装包或本地数据加入 Git。
 - 不发布 release、tag、远程 push、签名、上传安装包，除非用户明确确认。
-- 不自动下载 FFmpeg、执行 `tag.sh`、触发 GitHub Actions、读取/输出真实 Codex API key 或保存生成图片历史。
-- 任何涉及用户文件扫描、文件移动/删除/重命名、视频处理、文生图调用或发布包分发的改动，都必须更新 README 和 catalog 风险边界。
+- 不自动下载 FFmpeg、执行 `tag.sh`、触发 GitHub Actions，或读取/输出本机私有配置。
+- 任何涉及用户文件扫描、文件移动/删除/重命名、视频处理或发布包分发的改动，都必须更新 README 和 catalog 风险边界。
 
 ## Verification
 

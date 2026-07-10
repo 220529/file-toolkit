@@ -3,9 +3,6 @@ mod commands;
 use commands::convert::{cancel_convert, convert_video, get_file_size};
 use commands::dedup::{cancel_dedup, delete_files, find_duplicates, get_file_thumbnail};
 use commands::file_stats::{cancel_file_stats, scan_directory};
-use commands::image_generation::{
-    generate_image, get_image_generation_config, test_image_generation,
-};
 use commands::logger::{get_log_path, get_recent_logs};
 use commands::organize::organize_files;
 use commands::rename::batch_rename;
@@ -62,9 +59,6 @@ pub fn run() {
             reveal_file_path,
             path_exists,
             get_path_metadata,
-            get_image_generation_config,
-            generate_image,
-            test_image_generation,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

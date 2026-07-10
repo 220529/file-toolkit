@@ -3,7 +3,7 @@ use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use std::fs::{self, File};
-use std::io::{BufReader, Read};
+use std::io::{BufReader, Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
@@ -18,6 +18,17 @@ lazy_static::lazy_static! {
 }
 
 const MAX_ERROR_SAMPLES: usize = 3;
+const DEFAULT_DEDUP_IO_THREADS: usize = 1;
+const QUICK_SAMPLE_SIZE: usize = 16 * 1024;
+const TINY_FILE: u64 = 128 * 1024;
+
+fn dedup_io_threads() -> usize {
+    std::env::var("FILE_TOOLKIT_DEDUP_IO_THREADS")
+        .ok()
+        .and_then(|value| value.parse::<usize>().ok())
+        .map(|value| value.clamp(1, 8))
+        .unwrap_or(DEFAULT_DEDUP_IO_THREADS)
+}
 
 fn lock_cancelled_tasks() -> std::sync::MutexGuard<'static, HashMap<String, Arc<AtomicBool>>> {
     DEDUP_CANCELLED
@@ -66,9 +77,10 @@ fn matches_scope(path: &Path, scope: &str) -> bool {
 
     let is_image = ["jpg", "jpeg", "png", "gif", "bmp", "webp"].contains(&ext.as_str());
     let is_video = ["mp4", "mov", "avi", "mkv", "wmv", "flv", "webm"].contains(&ext.as_str());
+    let is_audio = ["mp3", "wav", "flac", "aac", "ogg", "m4a"].contains(&ext.as_str());
 
     match scope {
-        "media" => is_image || is_video,
+        "media" => is_image || is_video || is_audio,
         _ => true,
     }
 }
@@ -91,6 +103,19 @@ fn push_issue_entry(sample_errors: &mut Vec<DedupIssue>, issue: DedupIssue) {
         return;
     }
     sample_errors.push(issue);
+}
+
+fn sort_files_for_io(files: &mut [FileInfo]) {
+    files.sort_unstable_by(|a, b| a.path.cmp(&b.path));
+}
+
+fn filter_rate(before: usize, after: usize) -> f64 {
+    if before == 0 {
+        return 0.0;
+    }
+
+    let kept = after.min(before) as f64 / before as f64;
+    (1.0 - kept) * 100.0
 }
 
 fn build_file_info(path: &Path, meta: &std::fs::Metadata) -> FileInfo {
@@ -177,6 +202,130 @@ fn delete_path(path: &str, use_trash: bool) -> Result<(), trash::Error> {
             description: error.to_string(),
         })
     }
+}
+
+#[derive(Clone)]
+struct DedupStageContext {
+    io_threads: usize,
+    cancelled: Arc<AtomicBool>,
+    app: AppHandle,
+    task_id: String,
+}
+
+struct DedupStageProgress {
+    stage: &'static str,
+    detail: Option<&'static str>,
+    base_percent: f64,
+    percent_span: f64,
+    report_current_offset: usize,
+    report_total_override: Option<usize>,
+}
+
+fn run_dedup_stage<T, F>(
+    files: &[FileInfo],
+    context: DedupStageContext,
+    progress: DedupStageProgress,
+    worker: F,
+) -> Vec<Result<T, DedupIssue>>
+where
+    T: Send,
+    F: Fn(&FileInfo) -> Result<T, DedupIssue> + Sync,
+{
+    if files.is_empty() {
+        let reported_total = progress.report_total_override.unwrap_or(0);
+        let _ = context.app.emit(
+            "dedup-progress",
+            DedupProgress {
+                task_id: context.task_id,
+                stage: progress.stage.into(),
+                detail: progress.detail.map(str::to_string),
+                current: progress.report_current_offset,
+                total: reported_total,
+                percent: progress.base_percent + progress.percent_span,
+            },
+        );
+        return Vec::new();
+    }
+
+    let total = files.len();
+    let reported_total = progress
+        .report_total_override
+        .unwrap_or(total)
+        .max(progress.report_current_offset + total);
+    let progress_counter = Arc::new(AtomicUsize::new(0));
+    let last_reported = Arc::new(AtomicUsize::new(0));
+    let last_logged = Arc::new(AtomicUsize::new(0));
+    let report_every = (total / 200).clamp(1, 100);
+    let log_every = (total / 20).clamp(1, 1000);
+    let pool = rayon::ThreadPoolBuilder::new()
+        .num_threads(context.io_threads)
+        .thread_name(|index| format!("dedup-io-{}", index))
+        .build()
+        .expect("dedup thread pool should build");
+
+    pool.install(|| {
+        files
+            .par_iter()
+            .filter_map(|file_info| {
+                if context.cancelled.load(Ordering::Relaxed) {
+                    return None;
+                }
+
+                let result = worker(file_info);
+                let current = progress_counter.fetch_add(1, Ordering::Relaxed) + 1;
+                let last = last_reported.load(Ordering::Relaxed);
+                let should_report = current == 1
+                    || current == total
+                    || current.saturating_sub(last) >= report_every;
+
+                if should_report
+                    && last_reported
+                        .compare_exchange(last, current, Ordering::SeqCst, Ordering::Relaxed)
+                        .is_ok()
+                {
+                    let percent = progress.base_percent
+                        + (current as f64 / total as f64) * progress.percent_span;
+                    let reported_current =
+                        (progress.report_current_offset + current).min(reported_total);
+                    let _ = context.app.emit(
+                        "dedup-progress",
+                        DedupProgress {
+                            task_id: context.task_id.clone(),
+                            stage: progress.stage.into(),
+                            detail: progress.detail.map(str::to_string),
+                            current: reported_current,
+                            total: reported_total,
+                            percent,
+                        },
+                    );
+
+                    let last_log = last_logged.load(Ordering::Relaxed);
+                    if (current == 1
+                        || current == total
+                        || current.saturating_sub(last_log) >= log_every)
+                        && last_logged
+                            .compare_exchange(
+                                last_log,
+                                current,
+                                Ordering::SeqCst,
+                                Ordering::Relaxed,
+                            )
+                            .is_ok()
+                    {
+                        info!(
+                            "[去重] {}进度: {}/{} ({:.1}%)",
+                            progress.stage,
+                            current,
+                            total,
+                            (current as f64 / total as f64) * 100.0
+                        );
+                    }
+                }
+
+                Some(result)
+            })
+            .collect()
+    })
 }
 
 #[cfg(target_os = "macos")]
@@ -370,6 +519,7 @@ pub struct DedupResult {
 pub struct DedupProgress {
     pub task_id: String,
     pub stage: String,
+    pub detail: Option<String>,
     pub current: usize,
     pub total: usize,
     pub percent: f64,
@@ -424,6 +574,7 @@ pub async fn find_duplicates(
             DedupProgress {
                 task_id: task_id.clone(),
                 stage: "扫描文件".into(),
+                detail: Some("递归读取目录结构".into()),
                 current: 0,
                 total: 0,
                 percent: 0.0,
@@ -495,6 +646,7 @@ pub async fn find_duplicates(
                     DedupProgress {
                         task_id: task_id.clone(),
                         stage: "扫描文件".into(),
+                        detail: Some("递归读取目录结构".into()),
                         current: file_count,
                         total: 0,
                         percent: 0.0,
@@ -508,6 +660,7 @@ pub async fn find_duplicates(
             DedupProgress {
                 task_id: task_id.clone(),
                 stage: "扫描文件".into(),
+                detail: Some("递归读取目录结构".into()),
                 current: file_count,
                 total: 0,
                 percent: 0.0,
@@ -519,59 +672,137 @@ pub async fn find_duplicates(
             scan_start.elapsed()
         );
 
-        let files_to_sample: Vec<FileInfo> = size_map
+        let mut files_to_sample: Vec<FileInfo> = size_map
             .iter()
             .filter(|(_, files)| files.len() >= 2)
             .flat_map(|(_, files)| files.iter().cloned())
             .collect();
+        sort_files_for_io(&mut files_to_sample);
 
         let total_to_sample = files_to_sample.len();
         info!("[去重] 需要快速筛选: {} 个文件", total_to_sample);
 
         let sample_start = Instant::now();
-        let progress_counter = Arc::new(AtomicUsize::new(0));
-        let last_reported = Arc::new(AtomicUsize::new(0));
-        let app_clone = app.clone();
-        let cancelled_clone = cancelled.clone();
-
-        let sample_results: Vec<Result<(u64, String, FileInfo), DedupIssue>> = files_to_sample
-            .par_iter()
-            .filter_map(|file_info| {
-                if cancelled_clone.load(Ordering::Relaxed) {
-                    return None;
-                }
-
-                let result = calculate_sample_hash(Path::new(&file_info.path), file_info.size)
+        let io_threads = dedup_io_threads();
+        info!(
+            "[去重] 初步筛选尾部指纹开始: {} 个文件, I/O 并发 {}",
+            total_to_sample, io_threads
+        );
+        let tail_sample_results = run_dedup_stage(
+            &files_to_sample,
+            DedupStageContext {
+                io_threads,
+                cancelled: cancelled.clone(),
+                app: app.clone(),
+                task_id: task_id.clone(),
+            },
+            DedupStageProgress {
+                stage: "初步筛选重复文件",
+                detail: Some("读取尾部指纹，缩小同尺寸候选"),
+                base_percent: 0.0,
+                percent_span: 35.0,
+                report_current_offset: 0,
+                report_total_override: Some(total_to_sample.saturating_mul(2)),
+            },
+            |file_info| {
+                calculate_tail_sample_hash(Path::new(&file_info.path), file_info.size)
                     .map(|hash| (file_info.size, hash, file_info.clone()))
                     .map_err(|error| DedupIssue {
                         path: file_info.path.clone(),
-                        reason: format!("无法计算快速指纹: {}", error),
-                    });
+                        reason: format!("无法计算尾部指纹: {}", error),
+                    })
+            },
+        );
 
-                let current = progress_counter.fetch_add(1, Ordering::Relaxed) + 1;
-                let last = last_reported.load(Ordering::Relaxed);
-                if current > last
-                    && (current - last >= 20 || current == total_to_sample)
-                    && last_reported
-                        .compare_exchange(last, current, Ordering::SeqCst, Ordering::Relaxed)
-                        .is_ok()
-                {
-                    let percent = (current as f64 / total_to_sample as f64) * 70.0;
-                    let _ = app_clone.emit(
-                        "dedup-progress",
-                        DedupProgress {
-                            task_id: task_id.clone(),
-                            stage: "初步筛选重复文件".into(),
-                            current,
-                            total: total_to_sample,
-                            percent,
-                        },
-                    );
+        if cancelled.load(Ordering::Relaxed) {
+            info!("[去重] 用户取消操作");
+            return Err("操作已取消".to_string());
+        }
+
+        let mut tail_sample_map: HashMap<(u64, String), Vec<FileInfo>> = HashMap::new();
+        for result in tail_sample_results {
+            match result {
+                Ok((size, hash, file_info)) => {
+                    tail_sample_map
+                        .entry((size, hash))
+                        .or_default()
+                        .push(file_info);
                 }
+                Err(issue) => {
+                    hash_failed_files += 1;
+                    push_issue_entry(&mut sample_errors, issue);
+                }
+            }
+        }
 
-                Some(result)
-            })
-            .collect();
+        let mut sample_map: HashMap<(u64, String), Vec<FileInfo>> = HashMap::new();
+        let mut files_to_middle_sample = Vec::new();
+        let mut tail_hash_by_path: HashMap<String, String> = HashMap::new();
+        let mut small_file_candidates = 0usize;
+        for ((size, tail_hash), files) in tail_sample_map {
+            if files.len() <= 1 {
+                continue;
+            }
+
+            if size <= QUICK_SAMPLE_SIZE as u64 {
+                small_file_candidates += files.len();
+                sample_map
+                    .entry((size, tail_hash))
+                    .or_default()
+                    .extend(files);
+            } else {
+                for file_info in files {
+                    tail_hash_by_path.insert(file_info.path.clone(), tail_hash.clone());
+                    files_to_middle_sample.push(file_info);
+                }
+            }
+        }
+        sort_files_for_io(&mut files_to_middle_sample);
+
+        let total_to_middle_sample = files_to_middle_sample.len();
+        let tail_candidate_count = total_to_middle_sample + small_file_candidates;
+        let tail_filter_rate = filter_rate(total_to_sample, tail_candidate_count);
+        info!(
+            "[去重] 尾部指纹筛选完成: {} -> {} 个候选, 过滤 {:.1}%, 小文件跳过中段采样 {} 个",
+            total_to_sample, tail_candidate_count, tail_filter_rate, small_file_candidates
+        );
+        info!("[去重] 需要中段指纹确认: {} 个文件", total_to_middle_sample);
+
+        let middle_sample_results = run_dedup_stage(
+            &files_to_middle_sample,
+            DedupStageContext {
+                io_threads,
+                cancelled: cancelled.clone(),
+                app: app.clone(),
+                task_id: task_id.clone(),
+            },
+            DedupStageProgress {
+                stage: "初步筛选重复文件",
+                detail: Some("读取中段指纹，继续缩小候选"),
+                base_percent: 35.0,
+                percent_span: 35.0,
+                report_current_offset: total_to_sample,
+                report_total_override: Some(total_to_sample + total_to_middle_sample),
+            },
+            |file_info| {
+                calculate_middle_sample_hash(Path::new(&file_info.path), file_info.size)
+                    .map(|middle_hash| {
+                        let tail_hash = tail_hash_by_path
+                            .get(&file_info.path)
+                            .cloned()
+                            .unwrap_or_default();
+                        (
+                            file_info.size,
+                            format!("{}:{}", tail_hash, middle_hash),
+                            file_info.clone(),
+                        )
+                    })
+                    .map_err(|error| DedupIssue {
+                        path: file_info.path.clone(),
+                        reason: format!("无法计算中段指纹: {}", error),
+                    })
+            },
+        );
 
         if cancelled.load(Ordering::Relaxed) {
             info!("[去重] 用户取消操作");
@@ -579,8 +810,7 @@ pub async fn find_duplicates(
         }
         info!("[去重] 快速筛选完成, 耗时 {:?}", sample_start.elapsed());
 
-        let mut sample_map: HashMap<(u64, String), Vec<FileInfo>> = HashMap::new();
-        for result in sample_results {
+        for result in middle_sample_results {
             match result {
                 Ok((size, hash, file_info)) => {
                     sample_map.entry((size, hash)).or_default().push(file_info);
@@ -597,54 +827,47 @@ pub async fn find_duplicates(
             .filter(|(_, files)| files.len() > 1)
             .flat_map(|(_, files)| files.into_iter())
             .collect();
+        let mut files_to_hash = files_to_hash;
+        sort_files_for_io(&mut files_to_hash);
 
         let total_to_hash = files_to_hash.len();
+        let sample_filter_rate = filter_rate(total_to_sample, total_to_hash);
+        info!(
+            "[去重] 快速筛选候选完成: {} -> {} 个精确候选, 过滤 {:.1}%",
+            total_to_sample, total_to_hash, sample_filter_rate
+        );
         info!("[去重] 需要精确比对: {} 个文件", total_to_hash);
 
         let hash_start = Instant::now();
-        let progress_counter = Arc::new(AtomicUsize::new(0));
-        let last_reported = Arc::new(AtomicUsize::new(0));
-        let app_clone = app.clone();
-        let cancelled_clone = cancelled.clone();
-
-        let exact_results: Vec<Result<(String, FileInfo), DedupIssue>> = files_to_hash
-            .par_iter()
-            .filter_map(|file_info| {
-                if cancelled_clone.load(Ordering::Relaxed) {
-                    return None;
-                }
-
-                let result = calculate_confirm_hash(Path::new(&file_info.path), file_info.size)
+        info!(
+            "[去重] 精确确认开始: {} 个文件, I/O 并发 {}",
+            total_to_hash, io_threads
+        );
+        let exact_results = run_dedup_stage(
+            &files_to_hash,
+            DedupStageContext {
+                io_threads,
+                cancelled: cancelled.clone(),
+                app: app.clone(),
+                task_id: task_id.clone(),
+            },
+            DedupStageProgress {
+                stage: "确认重复文件",
+                detail: Some("完整读取候选文件，确认内容完全一致"),
+                base_percent: 70.0,
+                percent_span: 30.0,
+                report_current_offset: 0,
+                report_total_override: None,
+            },
+            |file_info| {
+                calculate_full_hash(Path::new(&file_info.path))
                     .map(|hash| (hash, file_info.clone()))
                     .map_err(|error| DedupIssue {
                         path: file_info.path.clone(),
                         reason: format!("无法确认重复候选: {}", error),
-                    });
-
-                let current = progress_counter.fetch_add(1, Ordering::Relaxed) + 1;
-                let last = last_reported.load(Ordering::Relaxed);
-                if current > last
-                    && (current - last >= 20 || current == total_to_hash)
-                    && last_reported
-                        .compare_exchange(last, current, Ordering::SeqCst, Ordering::Relaxed)
-                        .is_ok()
-                {
-                    let percent = 70.0 + (current as f64 / total_to_hash as f64) * 30.0;
-                    let _ = app_clone.emit(
-                        "dedup-progress",
-                        DedupProgress {
-                            task_id: task_id.clone(),
-                            stage: "确认重复文件".into(),
-                            current,
-                            total: total_to_hash,
-                            percent,
-                        },
-                    );
-                }
-
-                Some(result)
-            })
-            .collect();
+                    })
+            },
+        );
 
         if cancelled.load(Ordering::Relaxed) {
             info!("[去重] 用户取消操作");
@@ -705,6 +928,7 @@ pub async fn find_duplicates(
             DedupProgress {
                 task_id: task_id.clone(),
                 stage: "完成".into(),
+                detail: Some("已完成重复确认".into()),
                 current: total_to_hash.max(total_to_sample).max(1),
                 total: total_to_hash.max(total_to_sample).max(1),
                 percent: 100.0,
@@ -876,80 +1100,71 @@ fn build_temp_thumbnail_path() -> PathBuf {
     std::env::temp_dir().join(format!("thumb_{}_{}.jpg", std::process::id(), unique))
 }
 
-fn calculate_sample_hash(path: &Path, size: u64) -> Result<String, String> {
-    use memmap2::Mmap;
+fn calculate_middle_sample_hash(path: &Path, size: u64) -> Result<String, String> {
     use xxhash_rust::xxh3::Xxh3;
-
-    const TINY_FILE: u64 = 256 * 1024;
-    const SAMPLE_SIZE: usize = 512 * 1024;
 
     if size == 0 {
         return Ok("empty".into());
     }
 
-    let file = File::open(path).map_err(|error| error.to_string())?;
-    let mmap = unsafe { Mmap::map(&file) }.map_err(|error| error.to_string())?;
-    let len = mmap.len();
-
-    if size <= TINY_FILE {
-        let hash = xxhash_rust::xxh3::xxh3_64(&mmap);
-        return Ok(format!("{:016x}", hash));
-    }
-
+    let mut file = File::open(path).map_err(|error| error.to_string())?;
     let mut hasher = Xxh3::new();
-    let sample_len = SAMPLE_SIZE.min(len);
-
-    hasher.update(&mmap[..sample_len]);
-
-    if len > sample_len * 2 {
-        let mid = len / 2 - sample_len / 2;
-        hasher.update(&mmap[mid..mid + sample_len]);
-    }
-
-    if len > sample_len {
-        hasher.update(&mmap[len - sample_len..]);
-    }
 
     hasher.update(&size.to_le_bytes());
+
+    if size <= TINY_FILE {
+        let mut buffer = Vec::with_capacity(size as usize);
+        file.read_to_end(&mut buffer)
+            .map_err(|error| error.to_string())?;
+        hasher.update(&buffer);
+        return Ok(format!("{:016x}", hasher.digest()));
+    }
+
+    let sample_len = QUICK_SAMPLE_SIZE.min(size as usize);
+    let offset = if size > sample_len as u64 {
+        size / 2 - sample_len as u64 / 2
+    } else {
+        0
+    };
+    update_hash_from_file_segment(&mut file, &mut hasher, offset, sample_len)?;
+
     Ok(format!("{:016x}", hasher.digest()))
 }
 
-fn calculate_confirm_hash(path: &Path, size: u64) -> Result<String, String> {
-    use memmap2::Mmap;
+fn calculate_tail_sample_hash(path: &Path, size: u64) -> Result<String, String> {
     use xxhash_rust::xxh3::Xxh3;
-
-    const SMALL_FILE: u64 = 4 * 1024 * 1024;
-    const SAMPLE_SIZE: usize = 2 * 1024 * 1024;
 
     if size == 0 {
         return Ok("empty".into());
     }
 
-    let file = File::open(path).map_err(|error| error.to_string())?;
-    let mmap = unsafe { Mmap::map(&file) }.map_err(|error| error.to_string())?;
-    let len = mmap.len();
-
-    if size <= SMALL_FILE {
-        let hash = xxhash_rust::xxh3::xxh3_64(&mmap);
-        return Ok(format!("{:016x}", hash));
-    }
-
+    let mut file = File::open(path).map_err(|error| error.to_string())?;
     let mut hasher = Xxh3::new();
-    let sample_len = SAMPLE_SIZE.min(len);
-
-    hasher.update(&mmap[..sample_len]);
-
-    if len > sample_len * 2 {
-        let mid = len / 2 - sample_len / 2;
-        hasher.update(&mmap[mid..mid + sample_len]);
-    }
-
-    if len > sample_len {
-        hasher.update(&mmap[len - sample_len..]);
-    }
+    let sample_len = QUICK_SAMPLE_SIZE.min(size as usize);
 
     hasher.update(&size.to_le_bytes());
+    update_hash_from_file_segment(
+        &mut file,
+        &mut hasher,
+        size.saturating_sub(sample_len as u64),
+        sample_len,
+    )?;
     Ok(format!("{:016x}", hasher.digest()))
+}
+
+fn update_hash_from_file_segment(
+    file: &mut File,
+    hasher: &mut xxhash_rust::xxh3::Xxh3,
+    offset: u64,
+    len: usize,
+) -> Result<(), String> {
+    let mut buffer = vec![0_u8; len];
+    file.seek(SeekFrom::Start(offset))
+        .map_err(|error| error.to_string())?;
+    file.read_exact(&mut buffer)
+        .map_err(|error| error.to_string())?;
+    hasher.update(&buffer);
+    Ok(())
 }
 
 fn calculate_full_hash(path: &Path) -> Result<String, String> {
@@ -1015,7 +1230,7 @@ mod tests {
     }
 
     #[test]
-    fn sample_hash_can_match_while_full_hash_still_differs() {
+    fn middle_sample_hash_can_match_while_full_hash_still_differs() {
         let temp_dir = TestDir::new();
         let first = temp_dir.path().join("a.bin");
         let second = temp_dir.path().join("b.bin");
@@ -1028,23 +1243,61 @@ mod tests {
         fs::write(&first, &data_a).expect("failed to write first file");
         fs::write(&second, &data_b).expect("failed to write second file");
 
-        let sample_hash_a = calculate_sample_hash(&first, size as u64)
+        let sample_hash_a = calculate_middle_sample_hash(&first, size as u64)
             .expect("sample hash for first file should succeed");
-        let sample_hash_b = calculate_sample_hash(&second, size as u64)
+        let sample_hash_b = calculate_middle_sample_hash(&second, size as u64)
             .expect("sample hash for second file should succeed");
         assert_eq!(sample_hash_a, sample_hash_b);
-
-        let confirm_hash_a = calculate_confirm_hash(&first, size as u64)
-            .expect("confirm hash for first file should succeed");
-        let confirm_hash_b = calculate_confirm_hash(&second, size as u64)
-            .expect("confirm hash for second file should succeed");
-        assert_eq!(confirm_hash_a, confirm_hash_b);
 
         let full_hash_a =
             calculate_full_hash(&first).expect("full hash for first file should succeed");
         let full_hash_b =
             calculate_full_hash(&second).expect("full hash for second file should succeed");
         assert_ne!(full_hash_a, full_hash_b);
+    }
+
+    #[test]
+    fn tail_sample_hash_detects_tail_changes() {
+        let temp_dir = TestDir::new();
+        let first = temp_dir.path().join("tail-a.bin");
+        let second = temp_dir.path().join("tail-b.bin");
+
+        let size = 256 * 1024;
+        let data_a = vec![0_u8; size];
+        let mut data_b = data_a.clone();
+        data_b[size - 1] = 1;
+
+        fs::write(&first, &data_a).expect("failed to write first file");
+        fs::write(&second, &data_b).expect("failed to write second file");
+
+        let tail_hash_a = calculate_tail_sample_hash(&first, size as u64)
+            .expect("tail hash for first file should succeed");
+        let tail_hash_b = calculate_tail_sample_hash(&second, size as u64)
+            .expect("tail hash for second file should succeed");
+
+        assert_ne!(tail_hash_a, tail_hash_b);
+    }
+
+    #[test]
+    fn middle_sample_hash_detects_middle_changes() {
+        let temp_dir = TestDir::new();
+        let first = temp_dir.path().join("middle-a.bin");
+        let second = temp_dir.path().join("middle-b.bin");
+
+        let size = 256 * 1024;
+        let data_a = vec![0_u8; size];
+        let mut data_b = data_a.clone();
+        data_b[size / 2] = 1;
+
+        fs::write(&first, &data_a).expect("failed to write first file");
+        fs::write(&second, &data_b).expect("failed to write second file");
+
+        let middle_hash_a = calculate_middle_sample_hash(&first, size as u64)
+            .expect("middle hash for first file should succeed");
+        let middle_hash_b = calculate_middle_sample_hash(&second, size as u64)
+            .expect("middle hash for second file should succeed");
+
+        assert_ne!(middle_hash_a, middle_hash_b);
     }
 
     #[test]
@@ -1056,18 +1309,13 @@ mod tests {
         fs::write(&second, []).expect("failed to write second empty file");
 
         let sample_hash_a =
-            calculate_sample_hash(&first, 0).expect("sample hash should handle empty file");
+            calculate_middle_sample_hash(&first, 0).expect("sample hash should handle empty file");
         let sample_hash_b =
-            calculate_sample_hash(&second, 0).expect("sample hash should handle empty file");
-        let confirm_hash_a =
-            calculate_confirm_hash(&first, 0).expect("confirm hash should handle empty file");
-        let confirm_hash_b =
-            calculate_confirm_hash(&second, 0).expect("confirm hash should handle empty file");
+            calculate_middle_sample_hash(&second, 0).expect("sample hash should handle empty file");
         let full_hash_a = calculate_full_hash(&first).expect("full hash should handle empty file");
         let full_hash_b = calculate_full_hash(&second).expect("full hash should handle empty file");
 
         assert_eq!(sample_hash_a, sample_hash_b);
-        assert_eq!(confirm_hash_a, confirm_hash_b);
         assert_eq!(full_hash_a, full_hash_b);
     }
 

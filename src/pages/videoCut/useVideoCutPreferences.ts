@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 
-const PRECISE_MODE_STORAGE_KEY = "video-cut-precise-mode";
+const PRECISE_MODE_STORAGE_KEY = "video-cut-precise-mode-v2";
 const LOOP_PLAYBACK_STORAGE_KEY = "video-cut-loop-playback";
 const ADVANCED_CONTROLS_STORAGE_KEY = "video-cut-advanced-controls";
 
@@ -44,7 +44,7 @@ function usePersistedBooleanState(
 export function useVideoCutPreferences() {
   const [preciseMode, setPreciseMode] = usePersistedBooleanState(
     PRECISE_MODE_STORAGE_KEY,
-    false,
+    true,
     "读取精确模式偏好失败:",
     "保存精确模式偏好失败:"
   );

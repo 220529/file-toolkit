@@ -935,21 +935,29 @@ export default function VideoCut({ active = true }: { active?: boolean }) {
     previewReady,
     clipPlaybackActive,
   });
+  const exportModeTitle = preciseMode ? "精确导出" : "快速导出";
+  const exportModeDetail = preciseMode
+    ? "重新编码，首尾更贴近预览。"
+    : "无损复制，速度更快；只适合起点接近关键帧的片段。";
 
   return (
-    <div className="space-y-6 p-6">
+    <div className="mx-auto max-w-[1360px] space-y-4">
       {!videoPath ? (
         <>
           <Card className="overflow-hidden">
             <CardContent className="px-5 py-5">
               <div
                 onClick={selectVideo}
-                className={cn("drop-zone flex flex-col items-center justify-center", dragging && "dragging")}
+                className={cn("drop-zone flex flex-col items-center justify-center text-center", dragging && "dragging")}
               >
                 <div className="mb-4 flex h-12 w-12 items-center justify-center rounded-[8px] border border-slate-200 bg-slate-50 text-[var(--brand-700)]">
                   <Icon name={dragging ? "folderOpen" : "video"} size={30} />
                 </div>
                 <div className="text-lg font-semibold text-slate-900">{dragging ? "松开以载入视频" : "拖入视频，或点击选择"}</div>
+                <div className="mt-2 text-sm text-[var(--text-muted)]">支持 mp4、mov、mkv、webm 等常见视频</div>
+                <Button variant="primary" size="sm" className="mt-4">
+                  选择视频
+                </Button>
               </div>
             </CardContent>
           </Card>
@@ -958,55 +966,28 @@ export default function VideoCut({ active = true }: { active?: boolean }) {
         <>
           {videoInfo && (
             <Card>
-              <CardContent className="flex flex-wrap items-center gap-x-6 gap-y-2 px-5 py-4 text-sm">
-                <div className="flex items-center gap-2">
-                  <span className="text-slate-400">总时长</span>
-                  <span className="font-medium text-slate-900">{formatTime(videoInfo.duration)}</span>
-                </div>
-                <div className="flex items-center gap-2">
-                  <span className="text-slate-400">当前片段</span>
-                  <span className="font-medium text-slate-900">{formatTime(clipDuration)}</span>
-                </div>
-                <div className="flex items-center gap-2">
-                  <span className="text-slate-400">画面规格</span>
-                  <span className="font-medium text-slate-900">{videoInfo.width}×{videoInfo.height}</span>
-                </div>
+              <CardContent className="flex flex-wrap items-center gap-3 px-5 py-4 text-sm">
+                <VideoCutMetric label="总时长" value={formatTime(videoInfo.duration)} />
+                <VideoCutMetric label="当前片段" value={formatTime(clipDuration)} />
+                <VideoCutMetric label="画面规格" value={`${videoInfo.width}×${videoInfo.height}`} />
                 {showAdvancedControls && (
                   <>
-                    <div className="flex items-center gap-2">
-                      <span className="text-slate-400">帧率</span>
-                      <span className="font-medium text-slate-900">{formatFps(videoInfo.fps)} fps</span>
-                    </div>
-                    <div className="flex items-center gap-2">
-                      <span className="text-slate-400">当前帧</span>
-                      <span className="font-medium text-slate-900">#{currentPreviewFrameNumber}</span>
-                    </div>
-                    <div className="flex items-center gap-2">
-                      <span className="text-slate-400">片段帧数</span>
-                      <span className="font-medium text-slate-900">{clipFrameCount}</span>
-                    </div>
-                    <div className="flex items-center gap-2">
-                      <span className="text-slate-400">距开始</span>
-                      <span className="font-medium text-slate-900">{offsetFromStart === null ? "--" : formatTime(offsetFromStart)}</span>
-                    </div>
-                    <div className="flex items-center gap-2">
-                      <span className="text-slate-400">距结束</span>
-                      <span className="font-medium text-slate-900">{offsetToEnd === null ? "--" : formatTime(offsetToEnd)}</span>
-                    </div>
-                    <div className="flex items-center gap-2">
-                      <span className="text-slate-400">片段内位置</span>
-                      <span className="font-medium text-slate-900">{clipProgressPercent === null ? "--" : `${clipProgressPercent.toFixed(1)}%`}</span>
-                    </div>
-                    <div className="flex items-center gap-2">
-                      <span className="text-slate-400">预览状态</span>
-                      <span className={cn("font-medium", currentPreviewInClip ? "text-emerald-700" : "text-amber-700")}>{previewClipStatus}</span>
+                    <VideoCutMetric label="帧率" value={`${formatFps(videoInfo.fps)} fps`} />
+                    <VideoCutMetric label="当前帧" value={`#${currentPreviewFrameNumber}`} />
+                    <VideoCutMetric label="片段帧数" value={String(clipFrameCount)} />
+                    <VideoCutMetric label="距开始" value={offsetFromStart === null ? "--" : formatTime(offsetFromStart)} />
+                    <VideoCutMetric label="距结束" value={offsetToEnd === null ? "--" : formatTime(offsetToEnd)} />
+                    <VideoCutMetric label="片段内位置" value={clipProgressPercent === null ? "--" : `${clipProgressPercent.toFixed(1)}%`} />
+                    <div className="rounded-[8px] border border-[var(--stroke)] bg-[#f7f8f5] px-3 py-2">
+                      <div className="text-[11px] text-[var(--text-muted)]">预览状态</div>
+                      <div className={cn("mt-0.5 text-sm font-medium", currentPreviewInClip ? "text-[var(--success-600)]" : "text-[var(--warning-600)]")}>{previewClipStatus}</div>
                     </div>
                   </>
                 )}
-                <div className="ml-auto flex items-center gap-3 rounded-full border border-slate-200 bg-slate-50 px-3 py-2">
+                <div className="ml-auto flex items-center gap-3 rounded-[8px] border border-[var(--stroke)] bg-[#f7f8f5] px-3 py-2">
                   <div className="text-right">
-                    <div className="text-[11px] font-medium text-slate-700">高级微调</div>
-                    <div className="text-[10px] text-slate-400">{showAdvancedControls ? "已展开" : "默认简洁"}</div>
+                    <div className="text-[11px] font-medium text-[var(--text-strong)]">高级微调</div>
+                    <div className="text-[10px] text-[var(--text-muted)]">{showAdvancedControls ? "已展开" : "默认简洁"}</div>
                   </div>
                   <Switch checked={showAdvancedControls} onCheckedChange={setShowAdvancedControls} disabled={processing} />
                 </div>
@@ -1014,7 +995,7 @@ export default function VideoCut({ active = true }: { active?: boolean }) {
             </Card>
           )}
 
-          <div className="grid gap-6 xl:grid-cols-[minmax(0,1.55fr)_380px]">
+          <div className="grid items-start gap-4 xl:grid-cols-[minmax(0,1fr)_360px]">
             <VideoCutPreviewTimeline
               videoPath={videoPath}
               videoInfo={videoInfo}
@@ -1085,17 +1066,23 @@ export default function VideoCut({ active = true }: { active?: boolean }) {
               onTimelineHandlePointerDown={handleTimelineHandlePointerDown}
             />
 
-            <Card>
+            <Card className="xl:sticky xl:top-4">
               <CardHeader>
                 <div>
-                  <CardTitle>截取参数</CardTitle>
+                  <CardTitle>截取设置</CardTitle>
                 </div>
               </CardHeader>
-              <CardContent className="space-y-5">
-                <div className="grid gap-4">
-                  <div className="grid gap-3 md:grid-cols-3">
+              <CardContent className="space-y-4">
+                <div className="rounded-[8px] border border-[var(--stroke)] bg-[#f7f8f5] px-4 py-3">
+                  <div className="mb-3 flex items-center justify-between gap-3">
+                    <div className="text-sm font-medium text-[var(--text-strong)]">时间范围</div>
+                    <Button variant="ghost" size="sm" className="h-7 px-2 text-[11px]" onClick={resetClipRange} disabled={processing} title="恢复整段、停止播放并回到开头">
+                      恢复整段
+                    </Button>
+                  </div>
+                  <div className="grid gap-3 md:grid-cols-3 xl:grid-cols-1">
                     <div>
-                      <div className="mb-2 text-sm font-medium text-slate-800">开始</div>
+                      <div className="mb-2 text-xs font-medium text-[var(--text-muted)]">开始</div>
                       <Input
                         value={editingStart ? startTimeInput : formatTime(startTime)}
                         placeholder="mm:ss.000"
@@ -1145,14 +1132,14 @@ export default function VideoCut({ active = true }: { active?: boolean }) {
                     </div>
 
                     <div>
-                      <div className="mb-2 text-sm font-medium text-slate-800">时长</div>
-                      <div className="flex h-11 items-center rounded-xl border border-slate-200 bg-slate-50 px-3 font-mono text-sm text-slate-900">
+                      <div className="mb-2 text-xs font-medium text-[var(--text-muted)]">时长</div>
+                      <div className="flex h-10 items-center rounded-[8px] border border-[var(--stroke-strong)] bg-white px-3 font-mono text-sm text-[var(--text-strong)]">
                         {formatTime(clipDuration)}
                       </div>
                     </div>
 
                     <div>
-                      <div className="mb-2 text-sm font-medium text-slate-800">结束</div>
+                      <div className="mb-2 text-xs font-medium text-[var(--text-muted)]">结束</div>
                       <Input
                         value={editingEnd ? endTimeInput : formatTime(endTime)}
                         placeholder="mm:ss.000"
@@ -1203,63 +1190,29 @@ export default function VideoCut({ active = true }: { active?: boolean }) {
                   </div>
 
                   {videoInfo && (
-                    <>
-                      <div className="text-[11px] text-slate-400">
-                        {showAdvancedControls
-                          ? (
-                            <>
-                              拖动时间轴左手柄调整开始，右手柄调整结束。主预览会按帧吸附到当前位置。
-                              {preciseMode ? " 导出结果会更接近当前预览帧。" : " 快速模式导出可能受关键帧影响，与预览存在轻微偏差。"}
-                              {previewStrategy === "video"
-                                ? " 快捷键：空格或 L 播放片段，K 暂停，左右逐帧，Shift+左右快进退 1 秒，J 或 PageUp/PageDown 跨 10 帧，逗号/句号整体平移片段，Shift+逗号/句号按秒平移，Home/End 看起终点，B 回片段，M 看中点，[ 或 I 设开始，] 或 O 设结束，R 切换循环。"
-                                : " 当前为静态预览，可继续逐帧定位和导出。"}
-                            </>
-                          )
-                          : "默认保留高频操作。更多预览指标、回看与整段平移动作可在“展开高级微调”中查看。"}
-                      </div>
-                    </>
+                    <div className="mt-3 text-[11px] leading-5 text-[var(--text-muted)]">
+                      {preciseMode ? "当前导出会重新编码，首尾更接近预览。 " : "当前为快速导出，起点不在关键帧附近时可能无法按预览截取。 "}
+                      {previewStrategy === "image" ? "当前视频使用静态预览。 " : ""}
+                    </div>
                   )}
                 </div>
 
-                <div className="rounded-[10px] border border-slate-200 bg-slate-50 px-4 py-3">
-                  <div className="mb-3 text-sm font-medium text-slate-800">重置</div>
-                  <div className="grid gap-2">
-                    <Button
-                      variant="secondary"
-                      className="w-full justify-between"
-                      onClick={resetClipRange}
-                      disabled={processing}
-                      title="恢复整段、停止播放并回到开头"
-                    >
-                      <span>重置片段</span>
-                      <span className="text-[11px] text-slate-500">恢复整段并回到开头</span>
-                    </Button>
-                  </div>
-                  <div className="mt-2 text-[11px] text-slate-400">
-                    恢复整段并回到开头，不改长期偏好。
-                  </div>
-                </div>
-
-                <div className="rounded-[10px] border border-slate-200 bg-slate-50 px-4 py-3">
+                <div className="rounded-[8px] border border-[var(--stroke)] bg-[#f7f8f5] px-4 py-3">
                   <div className="flex items-center justify-between gap-3">
                     <div>
-                      <div className="text-sm font-medium text-slate-800">精确模式</div>
-                      <div className="text-[11px] text-slate-500">更准，但更慢。</div>
+                      <div className="text-sm font-medium text-[var(--text-strong)]">导出方式</div>
+                      <div className="mt-1 text-[11px] text-[var(--text-muted)]">{exportModeTitle}</div>
                     </div>
                     <Switch checked={preciseMode} onCheckedChange={setPreciseMode} disabled={processing} />
                   </div>
-                  <div className="mt-2 text-[11px] text-slate-500">
-                    {preciseMode
-                      ? "已开启：重新编码，结果更贴近预览。"
-                      : "已关闭：无损更快，但首尾可能有轻微偏差。"}
-                  </div>
+                  <div className="mt-2 text-[11px] leading-5 text-[var(--text-muted)]">{exportModeDetail}</div>
                   {!preciseMode && clipDuration > 0 && clipDuration < 1 && (
-                    <div className="mt-2 text-[11px] text-amber-700">
+                    <div className="mt-2 rounded-[6px] bg-[#fff4df] px-2 py-1.5 text-[11px] text-[var(--warning-600)]">
                       片段不足 1 秒，建议开精确模式。
                     </div>
                   )}
                   {previewStrategy === "video" && showAdvancedControls && (
-                    <div className="mt-2 text-[11px] text-slate-400">
+                    <div className="mt-2 text-[11px] text-[var(--text-muted)]">
                       {previewPlaying
                         ? clipPlaybackActive
                           ? "片段正在预览中。"
@@ -1272,23 +1225,23 @@ export default function VideoCut({ active = true }: { active?: boolean }) {
                 </div>
 
                 {processing && preciseMode && (
-                  <div className="space-y-2 rounded-[10px] border border-slate-200 bg-slate-50 px-4 py-3">
+                  <div className="space-y-2 rounded-[8px] border border-[var(--stroke)] bg-[#f7f8f5] px-4 py-3">
                     <div className="flex items-center justify-between text-sm">
-                      <span className="text-slate-800">正在编码</span>
+                      <span className="text-[var(--text-strong)]">正在编码</span>
                       <span className="font-mono text-[var(--brand-600)]">{progress.toFixed(1)}%</span>
                     </div>
                     <Progress value={progress} />
-                    <div className="text-[11px] text-slate-400">已锁定编辑，按 `Esc` 可取消。</div>
+                    <div className="text-[11px] text-[var(--text-muted)]">已锁定编辑，可取消当前任务。</div>
                   </div>
                 )}
 
-                  <div className="space-y-3 border-t border-slate-100 pt-4">
-                    <Button variant="primary" className="w-full" onClick={handleCut} disabled={processing || clipDuration <= 0}>
-                      {primaryActionLabel}
-                    </Button>
-                    {exportUnavailableReason && (
-                      <div className="text-center text-xs text-slate-400">{exportUnavailableReason}</div>
-                    )}
+                <div className="space-y-3 border-t border-[var(--stroke)] pt-4">
+                  <Button variant="primary" size="lg" className="w-full" onClick={handleCut} disabled={processing || clipDuration <= 0}>
+                    {primaryActionLabel}
+                  </Button>
+                  {exportUnavailableReason && (
+                    <div className="text-center text-xs text-[var(--text-muted)]">{exportUnavailableReason}</div>
+                  )}
                   {processing && preciseMode && (
                     <Button variant="danger" className="w-full" onClick={cancelCut}>
                       取消截取
@@ -1300,6 +1253,15 @@ export default function VideoCut({ active = true }: { active?: boolean }) {
           </div>
         </>
       )}
+    </div>
+  );
+}
+
+function VideoCutMetric({ label, value }: { label: string; value: string }) {
+  return (
+    <div className="rounded-[8px] border border-[var(--stroke)] bg-[#f7f8f5] px-3 py-2">
+      <div className="text-[11px] text-[var(--text-muted)]">{label}</div>
+      <div className="mt-0.5 font-medium text-[var(--text-strong)]">{value}</div>
     </div>
   );
 }

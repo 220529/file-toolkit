@@ -857,7 +857,7 @@ export default function Watermark({ active }: Props) {
   });
 
   return (
-    <div className="space-y-6 p-6">
+    <div className="mx-auto max-w-[1360px] space-y-4">
       <WatermarkDropCard dragging={dragging} loading={loading} onSelectFile={handleSelectFile} />
 
       {!image ? null : (

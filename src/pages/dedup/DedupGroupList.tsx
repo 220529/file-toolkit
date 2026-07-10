@@ -28,6 +28,7 @@ interface DedupGroupListProps {
   onToggleGroup: (hash: string) => void;
   onToggleSelect: (path: string) => void;
   selected: Set<string>;
+  selectionLocked?: boolean;
   totalHeight: number;
   visibleItems: VirtualItem[];
 }
@@ -46,6 +47,7 @@ export function DedupGroupList({
   onToggleGroup,
   onToggleSelect,
   selected,
+  selectionLocked,
   totalHeight,
   visibleItems,
 }: DedupGroupListProps) {
@@ -65,22 +67,25 @@ export function DedupGroupList({
           <div
             key={group.hash}
             ref={onAttachMeasuredNode(group.hash)}
-            className="absolute left-0 right-0 pb-4"
+            className="absolute left-0 right-0 pb-2"
             style={{ top: `${item.top}px` }}
           >
             <Card
-              className="overflow-hidden"
+              className={cn(
+                "overflow-hidden transition-colors",
+                expanded ? "border-[rgba(47,125,189,0.28)]" : "hover:border-[rgba(47,125,189,0.24)]"
+              )}
               onMouseEnter={() => {
                 if (previewable) {
                   void onLoadGroupThumbnail(group.hash, representativeFile.path);
                 }
               }}
             >
-              <CardHeader className="cursor-pointer bg-slate-50/85" onClick={() => onToggleGroup(group.hash)}>
-                <div className="flex min-w-0 items-center gap-4">
+              <CardHeader className="cursor-pointer flex-col gap-3 bg-white px-4 py-3 sm:flex-row sm:items-center" onClick={() => onToggleGroup(group.hash)}>
+                <div className="flex min-w-0 flex-1 items-center gap-3">
                   {previewable ? (
                     <div
-                      className="flex h-16 w-16 flex-shrink-0 cursor-pointer items-center justify-center overflow-hidden rounded-[10px] bg-slate-200"
+                      className="flex h-[52px] w-[52px] flex-shrink-0 cursor-pointer items-center justify-center overflow-hidden rounded-[8px] border border-[var(--stroke)] bg-[#eef3f5]"
                       onClick={(event) => {
                         event.stopPropagation();
                         if (groupThumb) onPreviewImage(groupThumb);
@@ -89,58 +94,67 @@ export function DedupGroupList({
                       {groupThumb ? (
                         <img src={groupThumb} alt="" className="h-full w-full object-cover" />
                       ) : (
-                        <div className="flex flex-col items-center gap-1 text-center text-xs text-slate-400">
-                          <Icon name={getFileIconName(representativeFile.name)} size={22} />
-                          <div>{hasGroupThumb ? "暂无封面" : "加载封面"}</div>
+                        <div className="flex flex-col items-center gap-1 text-center text-[10px] text-[var(--text-soft)]">
+                          <Icon name={getFileIconName(representativeFile.name)} size={20} />
+                          <div>{hasGroupThumb ? "无封面" : "预览"}</div>
                         </div>
                       )}
                     </div>
                   ) : (
-                    <div className="flex h-16 w-16 flex-shrink-0 items-center justify-center rounded-[10px] bg-slate-100 text-slate-500">
-                      <Icon name={getFileIconName(representativeFile.name)} size={28} />
+                    <div className="flex h-[52px] w-[52px] flex-shrink-0 items-center justify-center rounded-[8px] border border-[var(--stroke)] bg-[#eef3f5] text-[var(--text-muted)]">
+                      <Icon name={getFileIconName(representativeFile.name)} size={24} />
                     </div>
                   )}
-                  <div className="min-w-0">
+                  <div className="min-w-0 flex-1">
                     <div className="flex items-center gap-2">
-                      <CardTitle className="text-[15px]">第 {idx + 1} 组</CardTitle>
+                      <CardTitle className="text-[14px]">第 {idx + 1} 组</CardTitle>
                       <Badge tone="default">{group.files.length} 个文件</Badge>
                       <Badge tone={expanded ? "info" : "default"}>{expanded ? "收起" : "展开"}</Badge>
                     </div>
-                    <div className="mt-1 truncate text-sm text-slate-500">{representativeFile.name}</div>
-                    <div className="mt-2 flex flex-wrap items-center gap-2 text-xs text-slate-400">
+                    <div className="mt-1 truncate text-sm font-medium text-[var(--text-strong)]">{representativeFile.name}</div>
+                    <div className="mt-1 flex flex-wrap items-center gap-2 text-xs text-[var(--text-muted)]">
                       <span>{formatSize(group.size)} / 文件</span>
-                      <span>哈希片段 {group.hash.slice(0, 10)}</span>
+                      <span className="font-mono">hash {group.hash.slice(0, 10)}</span>
                     </div>
                   </div>
                 </div>
-                <Badge tone="warning">预计释放 {formatSize(group.size * (group.files.length - 1))}</Badge>
+                <div className="flex shrink-0 flex-row items-center justify-between gap-3 rounded-[8px] bg-[#f7f8f5] px-3 py-2 sm:flex-col sm:items-end sm:bg-transparent sm:px-0 sm:py-0">
+                  <div className="font-mono text-sm font-semibold text-[var(--accent-600)]">
+                    {formatSize(group.size * (group.files.length - 1))}
+                  </div>
+                  <div className="text-[11px] text-[var(--text-muted)]">预计释放</div>
+                </div>
               </CardHeader>
               {expanded && (
-                <CardContent className="space-y-2 px-3 py-3">
+                <CardContent className="space-y-1.5 border-t border-[var(--stroke)] bg-[#fbfcfa] px-3 py-3">
                   {sortedFiles.map((file, fileIdx) => (
                     <div
                       key={file.path}
-                      onClick={() => onToggleSelect(file.path)}
+                      onClick={() => {
+                        if (!selectionLocked) onToggleSelect(file.path);
+                      }}
                       onMouseEnter={() => {
                         if (isPreviewable(file.name)) {
                           void onLoadFileThumbnail(file.path);
                         }
                       }}
                       className={cn(
-                        "flex cursor-pointer items-center gap-3 rounded-[10px] border px-3 py-3 transition",
+                        "grid grid-cols-[auto_auto_minmax(0,1fr)] items-center gap-3 rounded-[8px] border px-3 py-2.5 transition lg:grid-cols-[auto_auto_minmax(0,1fr)_auto_auto]",
+                        selectionLocked ? "cursor-not-allowed opacity-70" : "cursor-pointer",
                         selected.has(file.path)
-                          ? "border-rose-200 bg-rose-50"
-                          : "border-transparent bg-slate-50/80 hover:border-slate-200 hover:bg-white"
+                          ? "border-[rgba(187,62,58,0.24)] bg-[#fff0ef]"
+                          : "border-transparent bg-[#f7f8f5] hover:border-[var(--stroke)] hover:bg-white"
                       )}
                     >
                       <Checkbox
                         checked={selected.has(file.path)}
+                        disabled={selectionLocked}
                         onClick={(event) => event.stopPropagation()}
                         onCheckedChange={() => onToggleSelect(file.path)}
                       />
                       {isPreviewable(file.name) ? (
                         <div
-                          className="flex h-11 w-11 flex-shrink-0 cursor-pointer items-center justify-center overflow-hidden rounded-xl bg-slate-100 text-xl"
+                          className="flex h-10 w-10 flex-shrink-0 cursor-pointer items-center justify-center overflow-hidden rounded-[7px] border border-[var(--stroke)] bg-white text-xl"
                           onClick={(event) => {
                             event.stopPropagation();
                             const thumb = fileThumbnails.get(file.path);
@@ -151,22 +165,23 @@ export function DedupGroupList({
                           {fileThumbnails.get(file.path) ? (
                             <img src={fileThumbnails.get(file.path)} alt="" className="h-full w-full object-cover" />
                           ) : (
-                            <Icon name={getFileIconName(file.name)} size={18} className="text-slate-400" />
+                            <Icon name={getFileIconName(file.name)} size={18} className="text-[var(--text-soft)]" />
                           )}
                         </div>
                       ) : (
-                        <div className="flex h-11 w-11 flex-shrink-0 items-center justify-center rounded-xl bg-slate-100 text-slate-500">
+                        <div className="flex h-10 w-10 flex-shrink-0 items-center justify-center rounded-[7px] border border-[var(--stroke)] bg-white text-[var(--text-muted)]">
                           <Icon name={getFileIconName(file.name)} size={20} />
                         </div>
                       )}
                       <div className="min-w-0 flex-1">
-                        <div className="truncate text-sm font-medium text-slate-900">{file.name}</div>
-                        <div className="truncate text-xs text-slate-500">{file.path}</div>
-                        <div className="mt-1 text-xs text-slate-400">
+                        <div className="truncate text-sm font-medium text-[var(--text-strong)]">{file.name}</div>
+                        <div className="truncate text-xs text-[var(--text-muted)]">{file.path}</div>
+                        <div className="mt-1 text-xs text-[var(--text-soft)]">
                           创建 {formatDate(file.created)} · 修改 {formatDate(file.modified)}
                         </div>
                       </div>
-                      <div className="flex items-center gap-2">
+                      {fileIdx === 0 && <Badge tone="success">建议保留</Badge>}
+                      <div className="col-span-3 flex flex-wrap items-center justify-end gap-2 lg:col-span-1">
                         <Button
                           variant="ghost"
                           size="sm"
@@ -188,7 +203,6 @@ export function DedupGroupList({
                           位置
                         </Button>
                       </div>
-                      {fileIdx === 0 && <Badge tone="success">建议保留</Badge>}
                     </div>
                   ))}
                 </CardContent>

@@ -498,10 +498,12 @@ function SegmentedControl<T extends string>({
   options: Array<{ value: T; label: string }>;
   onChange: (value: T) => void;
 }) {
+  const gridColumns = options.length === 4 ? "grid-cols-4" : "grid-cols-3";
+
   return (
     <div className="space-y-1.5">
       <div className="text-[11px] font-medium text-slate-500">{label}</div>
-      <div className="grid grid-cols-3 gap-1 rounded-[8px] border border-slate-200 bg-white p-1">
+      <div className={cn("grid gap-1 rounded-[8px] border border-slate-200 bg-white p-1", gridColumns)}>
         {options.map((item) => (
           <button
             key={item.value}

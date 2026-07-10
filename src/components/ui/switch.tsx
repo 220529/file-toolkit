@@ -11,7 +11,7 @@ export function Switch({ className, ...props }: SwitchProps) {
         "relative inline-flex h-6 w-11 shrink-0 items-center rounded-full border transition outline-none",
         "focus-visible:ring-2 focus-visible:ring-[var(--brand-300)] focus-visible:ring-offset-2 focus-visible:ring-offset-white",
         "data-[state=checked]:border-[var(--brand-500)] data-[state=checked]:bg-[var(--brand-500)]",
-        "data-[state=unchecked]:border-slate-200 data-[state=unchecked]:bg-slate-200",
+        "data-[state=unchecked]:border-[var(--stroke)] data-[state=unchecked]:bg-[#e3e8e8]",
         "disabled:cursor-not-allowed disabled:opacity-50 disabled:saturate-50",
         className
       )}

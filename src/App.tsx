@@ -3,16 +3,10 @@ import { getVersion } from "@tauri-apps/api/app";
 import { Badge } from "./components/ui/badge";
 import { Button } from "./components/ui/button";
 import { Card, CardContent, CardTitle } from "./components/ui/card";
-import {
-  DropdownMenu,
-  DropdownMenuContent,
-  DropdownMenuItem,
-  DropdownMenuTrigger,
-} from "./components/ui/dropdown-menu";
 import { Icon, type IconName } from "./components/ui/icon";
 import { Modal } from "./components/ui/modal";
 import { Tooltip, TooltipProvider } from "./components/ui/tooltip";
-import { TaskCenterProvider, TaskStatusBar } from "./components/TaskCenter";
+import { TaskCenterProvider, TaskStatusBar, useTaskCenter } from "./components/TaskCenter";
 import { ToastProvider } from "./components/Toast";
 import LogViewer from "./components/LogViewer";
 import { cn } from "./utils/cn";
@@ -25,10 +19,10 @@ const Dedup = lazy(() => import("./pages/Dedup"));
 const VideoCut = lazy(() => import("./pages/VideoCut"));
 const BatchVideoTrim = lazy(() => import("./pages/BatchVideoTrim"));
 const VideoConvert = lazy(() => import("./pages/VideoConvert"));
-const TextToImage = lazy(() => import("./pages/TextToImage"));
 const Watermark = lazy(() => import("./pages/Watermark"));
 
-type Tab = "stats" | "file-organize" | "batch-rename" | "dedup" | "video-cut" | "batch-video-trim" | "video-convert" | "text-to-image" | "watermark";
+type Tab = "stats" | "file-organize" | "batch-rename" | "dedup" | "video-cut" | "batch-video-trim" | "video-convert" | "watermark";
+type ResetMode = "current" | "all";
 
 const tabMeta: Record<Tab, { label: string; icon: IconName; section: string }> = {
   stats: { label: "文件统计", icon: "stats", section: "文件" },
@@ -38,9 +32,47 @@ const tabMeta: Record<Tab, { label: string; icon: IconName; section: string }> =
   "video-cut": { label: "视频截取", icon: "scissors", section: "视频" },
   "batch-video-trim": { label: "批量去头", icon: "batch", section: "视频" },
   "video-convert": { label: "格式转换", icon: "convert", section: "视频" },
-  "text-to-image": { label: "文生图", icon: "image", section: "图像" },
   watermark: { label: "水印处理", icon: "magic", section: "图像" },
 };
+
+const tabSections: Array<{ title: string; tabs: Tab[] }> = [
+  { title: "文件", tabs: ["stats", "file-organize", "batch-rename", "dedup"] },
+  { title: "视频", tabs: ["video-cut", "batch-video-trim", "video-convert"] },
+  { title: "图像", tabs: ["watermark"] },
+];
+
+const initialResetVersions: Record<Tab, number> = {
+  stats: 0,
+  "file-organize": 0,
+  "batch-rename": 0,
+  dedup: 0,
+  "video-cut": 0,
+  "batch-video-trim": 0,
+  "video-convert": 0,
+  watermark: 0,
+};
+
+const taskIdsByTab: Record<Tab, string> = {
+  stats: "file-stats",
+  "file-organize": "file-organize",
+  "batch-rename": "batch-rename",
+  dedup: "dedup",
+  "video-cut": "video-cut",
+  "batch-video-trim": "batch-video-trim",
+  "video-convert": "video-convert",
+  watermark: "watermark",
+};
+
+interface SidebarTool {
+  label: string;
+  shortLabel: string;
+  expandedLabel: string;
+  icon: IconName;
+  onClick: () => void;
+  disabled?: boolean;
+}
+
+const AUTO_COLLAPSE_WIDTH = 920;
 
 function PageFallback() {
   return (
@@ -71,20 +103,37 @@ function PageSlot({
   );
 }
 
-function App() {
+function AppShell() {
   const [activeTab, setActiveTab] = useState<Tab>("stats");
   const [visitedTabs, setVisitedTabs] = useState<Set<Tab>>(() => new Set(["stats"]));
-  const [collapsed, setCollapsed] = useState(false);
-  const [showToolsMenu, setShowToolsMenu] = useState(false);
+  const [collapsed, setCollapsed] = useState(() =>
+    typeof window === "undefined" ? false : window.innerWidth < AUTO_COLLAPSE_WIDTH
+  );
+  const [sidebarPreference, setSidebarPreference] = useState<boolean | null>(null);
   const [showAbout, setShowAbout] = useState(false);
-  const [showResetConfirm, setShowResetConfirm] = useState(false);
+  const [resetMode, setResetMode] = useState<ResetMode | null>(null);
   const [showLogs, setShowLogs] = useState(false);
-  const [resetKey, setResetKey] = useState(0);
+  const [resetVersions, setResetVersions] = useState<Record<Tab, number>>(initialResetVersions);
   const [version, setVersion] = useState("0.0.0");
+  const { tasks } = useTaskCenter();
 
   useEffect(() => {
     getVersion().then(setVersion).catch(() => {});
   }, []);
+
+  useEffect(() => {
+    function syncSidebarWidth() {
+      if (window.innerWidth < AUTO_COLLAPSE_WIDTH) {
+        setCollapsed(true);
+        return;
+      }
+      setCollapsed(sidebarPreference ?? false);
+    }
+
+    syncSidebarWidth();
+    window.addEventListener("resize", syncSidebarWidth);
+    return () => window.removeEventListener("resize", syncSidebarWidth);
+  }, [sidebarPreference]);
 
   useEffect(() => {
     setVisitedTabs((current) => {
@@ -97,38 +146,85 @@ function App() {
     });
   }, [activeTab]);
 
-  function handleReset() {
-    setResetKey((current) => current + 1);
-    setActiveTab("stats");
-    setShowResetConfirm(false);
+  const activeMeta = tabMeta[activeTab];
+  const anyTaskRunning = tasks.some((task) => task.status === "running");
+  const activeTaskRunning = tasks.some(
+    (task) => task.id === taskIdsByTab[activeTab] && task.status === "running"
+  );
+  const resetBlocked = resetMode === "all" ? anyTaskRunning : activeTaskRunning;
+  const resetTitle = resetMode === "all" ? "重置全部模块？" : `重置${activeMeta.label}？`;
+  const resetDescription =
+    resetMode === "all"
+      ? anyTaskRunning
+        ? "还有任务运行中，请先取消或等待完成后再重置全部模块。"
+        : "会清空所有模块的路径、结果、预览和临时设置。"
+      : activeTaskRunning
+        ? "当前模块还有任务运行中，请先取消或等待完成后再重置。"
+        : "会清空当前模块的路径、结果、预览和临时设置，不影响其它模块。";
+
+  function openCurrentResetConfirm() {
+    setResetMode("current");
   }
 
-  const activeMeta = tabMeta[activeTab];
+  function openAllResetConfirm() {
+    setResetMode("all");
+  }
+
+  function handleReset() {
+    if (!resetMode || resetBlocked) return;
+
+    setResetVersions((current) => {
+      if (resetMode === "all") {
+        return Object.fromEntries(
+          (Object.keys(current) as Tab[]).map((tab) => [tab, current[tab] + 1])
+        ) as Record<Tab, number>;
+      }
+
+      return {
+        ...current,
+        [activeTab]: current[activeTab] + 1,
+      };
+    });
+    setResetMode(null);
+    window.requestAnimationFrame(() => {
+      document.querySelector<HTMLElement>("[data-main-scroll='true']")?.scrollTo({ top: 0 });
+    });
+  }
+
+  const sidebarTools: SidebarTool[] = [
+    {
+      label: anyTaskRunning ? "还有任务运行中，暂不能重置全部模块" : "重置全部模块",
+      shortLabel: "重置",
+      expandedLabel: "重置全部",
+      icon: "reset",
+      onClick: openAllResetConfirm,
+      disabled: anyTaskRunning,
+    },
+    { label: "查看日志", shortLabel: "日志", expandedLabel: "日志", icon: "logs", onClick: () => setShowLogs(true) },
+    { label: "关于小文喵", shortLabel: "关于", expandedLabel: "关于", icon: "info", onClick: () => setShowAbout(true) },
+  ];
 
   return (
-    <ToastProvider>
-      <TooltipProvider delayDuration={300}>
-        <TaskCenterProvider>
-        <div className="h-screen overflow-hidden p-3 text-slate-900">
-          <div className="relative flex h-full overflow-hidden rounded-[12px] border border-slate-200 bg-white shadow-[0_1px_3px_rgba(15,23,42,0.08)]">
+    <div className="h-screen overflow-hidden bg-[var(--canvas)] text-[var(--text-strong)]">
+          <div className="relative flex h-full overflow-hidden bg-[var(--panel)]">
             <aside
               className={cn(
-                "relative z-10 flex h-full flex-col border-r border-slate-200 bg-[var(--nav-bg)] px-3 py-3 text-slate-800 transition-all duration-300",
-                collapsed ? "w-[66px]" : "w-[210px]"
+                "app-sidebar relative z-10 flex h-full flex-col border-r border-[var(--nav-stroke)] bg-[var(--nav-bg)] px-2 py-3 text-white transition-all duration-300",
+                collapsed ? "w-[56px]" : "w-[184px]"
               )}
             >
               <div
                 className={cn(
-                  "mb-4 flex items-center gap-2 rounded-[10px] border border-transparent p-1.5",
+                  "app-sidebar-brand mb-3 flex items-center gap-2 rounded-[8px] border border-[var(--nav-stroke)] bg-[var(--nav-bg-raised)] p-1.5",
                   collapsed && "flex-col justify-center"
                 )}
               >
-                <div className="flex h-10 w-10 items-center justify-center rounded-[8px] border border-slate-200 bg-slate-50 text-[var(--brand-700)]">
-                  <Icon name="app" size={20} />
+                <div className="flex h-9 w-9 items-center justify-center rounded-[7px] bg-white text-[var(--brand-700)]">
+                  <Icon name="app" size={18} />
                 </div>
                 {!collapsed && (
-                  <div className="min-w-0 flex-1">
-                    <div className="truncate text-[14px] font-semibold text-slate-950">小文喵</div>
+                  <div className="app-sidebar-brand-text min-w-0 flex-1">
+                    <div className="truncate text-[14px] font-semibold text-white">小文喵</div>
                     <div className="mt-0.5 truncate text-[11px] text-[var(--nav-muted)]">File Toolkit · v{version}</div>
                   </div>
                 )}
@@ -137,12 +233,15 @@ function App() {
               <Tooltip content={collapsed ? "展开导航" : "收起导航"} side="right">
                 <button
                   className={cn(
-                    "absolute right-[-12px] top-1/2 z-20 flex h-11 w-6 -translate-y-1/2 items-center justify-center rounded-full border border-slate-200 bg-white text-slate-500 shadow-[0_2px_6px_rgba(15,23,42,0.12)] transition hover:text-[var(--brand-700)]",
+                    "absolute right-[-12px] top-1/2 z-20 flex h-11 w-6 -translate-y-1/2 items-center justify-center rounded-full border border-[var(--stroke)] bg-white text-[var(--text-muted)] shadow-[0_8px_18px_rgba(16,20,23,0.16)] transition hover:text-[var(--brand-700)]",
                     collapsed && "right-[-11px]"
                   )}
                   onClick={() => {
-                    setCollapsed((value) => !value);
-                    setShowToolsMenu(false);
+                    setCollapsed((value) => {
+                      const next = !value;
+                      setSidebarPreference(next);
+                      return next;
+                    });
                   }}
                   aria-label={collapsed ? "展开导航" : "收起导航"}
                 >
@@ -150,164 +249,180 @@ function App() {
                 </button>
               </Tooltip>
 
-              <nav className="flex-1 space-y-1">
-                {(Object.keys(tabMeta) as Tab[]).map((tab) => {
-                  const item = tabMeta[tab];
-                  const active = activeTab === tab;
-                  const navButton = (
-                    <button
-                      key={tab}
-                      onClick={() => {
-                        setActiveTab(tab);
-                        setShowToolsMenu(false);
-                      }}
-                      aria-label={item.label}
-                      className={cn(
-                        "group relative flex w-full items-center gap-2.5 rounded-[8px] px-2 py-2.5 text-left transition-all duration-200",
-                        active
-                          ? "bg-[var(--brand-50)] text-[var(--brand-700)] ring-1 ring-blue-100"
-                          : "text-slate-600 hover:bg-slate-100 hover:text-slate-950",
-                        collapsed && "justify-center px-0"
-                      )}
-                    >
-                      {active && !collapsed && <span className="absolute left-0 top-2 bottom-2 w-1 rounded-r-full bg-[var(--accent-500)]" />}
-                      <div
-                        className={cn(
-                          "flex h-9 w-9 items-center justify-center rounded-[8px] transition-all",
-                          active ? "bg-white text-[var(--brand-700)] ring-1 ring-blue-100" : "bg-white text-slate-500 ring-1 ring-slate-200"
-                        )}
-                      >
-                        <Icon name={item.icon} size={18} />
-                      </div>
-                      {!collapsed && (
-                        <div className="min-w-0">
-                          <div className="truncate text-[13px] font-medium">{item.label}</div>
-                          <div className={cn("mt-0.5 text-[10px]", active ? "text-slate-500" : "text-[var(--nav-muted)]")}>{item.section}</div>
-                        </div>
-                      )}
-                    </button>
-                  );
-                  return collapsed ? (
-                    <Tooltip key={tab} content={item.label} side="right">
-                      {navButton}
-                    </Tooltip>
-                  ) : (
-                    navButton
-                  );
-                })}
+              <nav className="flex-1 space-y-3">
+                {tabSections.map((section) => (
+                  <div key={section.title} className="space-y-1">
+                    {!collapsed && (
+                      <div className="app-sidebar-section-title px-2 pt-1 text-[11px] font-medium text-[var(--nav-muted)]">{section.title}</div>
+                    )}
+                    {section.tabs.map((tab) => {
+                      const item = tabMeta[tab];
+                      const active = activeTab === tab;
+                      const navButton = (
+                        <button
+                          key={tab}
+                          onClick={() => {
+                            setActiveTab(tab);
+                          }}
+                          aria-label={item.label}
+                          className={cn(
+                            "app-sidebar-item group flex h-9 w-full items-center gap-2 rounded-[8px] px-2 text-left transition-colors duration-150",
+                            active
+                              ? "bg-[var(--brand-500)] text-white"
+                              : "text-[#d7dee4] hover:bg-white/[0.08] hover:text-white",
+                            collapsed && "justify-center px-0"
+                          )}
+                        >
+                          <div
+                            className={cn(
+                              "flex h-7 w-7 items-center justify-center rounded-[7px] transition-colors",
+                              active ? "bg-white/15 text-white" : "bg-white/[0.06] text-[#aeb9c0]"
+                            )}
+                          >
+                            <Icon name={item.icon} size={16} />
+                          </div>
+                          {!collapsed && <div className="app-sidebar-label min-w-0 truncate text-[13px] font-medium">{item.label}</div>}
+                        </button>
+                      );
+                      return collapsed ? (
+                        <Tooltip key={tab} content={item.label} side="right">
+                          {navButton}
+                        </Tooltip>
+                      ) : (
+                        navButton
+                      );
+                    })}
+                  </div>
+                ))}
               </nav>
 
-              <div className="relative mt-4 border-t border-slate-200 pt-4">
-                <DropdownMenu open={showToolsMenu} onOpenChange={setShowToolsMenu}>
-                  <DropdownMenuTrigger asChild>
-                    <button
-                      className={cn(
-                        "group flex w-full items-center justify-center rounded-[8px] border border-slate-200 bg-white px-2.5 py-2.5 text-slate-600 transition hover:border-slate-300 hover:bg-slate-50 hover:text-slate-950",
-                        collapsed && "justify-center px-0"
-                      )}
-                      aria-label="更多工具"
-                    >
-                      <Icon name="more" size={16} />
-                      {!collapsed && <span className="text-[13px] font-medium">更多</span>}
-                    </button>
-                  </DropdownMenuTrigger>
-                  <DropdownMenuContent side="top" align={collapsed ? "start" : "center"} className={collapsed ? "w-[188px]" : "w-[166px]"}>
-                    <DropdownMenuItem onSelect={() => setShowResetConfirm(true)}>
-                      <span className="flex h-8 w-8 items-center justify-center rounded-[8px] bg-slate-100 text-slate-700">
-                        <Icon name="reset" size={16} />
-                      </span>
-                      <span className="font-medium">重置</span>
-                    </DropdownMenuItem>
-                    <DropdownMenuItem onSelect={() => setShowLogs(true)}>
-                      <span className="flex h-8 w-8 items-center justify-center rounded-[8px] bg-slate-100 text-slate-700">
-                        <Icon name="logs" size={16} />
-                      </span>
-                      <span className="font-medium">日志</span>
-                    </DropdownMenuItem>
-                    <DropdownMenuItem onSelect={() => setShowAbout(true)}>
-                      <span className="flex h-8 w-8 items-center justify-center rounded-[8px] bg-slate-100 text-slate-700">
-                        <Icon name="info" size={16} />
-                      </span>
-                      <span className="font-medium">关于</span>
-                    </DropdownMenuItem>
-                  </DropdownMenuContent>
-                </DropdownMenu>
+              <div
+                className={cn(
+                  "app-sidebar-tools mt-3 border-t border-[var(--nav-stroke)] pt-3",
+                  collapsed ? "flex flex-col items-center gap-2" : "space-y-2"
+                )}
+              >
+                {collapsed ? (
+                  sidebarTools.map((tool) => (
+                    <Tooltip key={tool.shortLabel} content={tool.label} side="right">
+                      <button
+                        className={cn(
+                          "group flex h-9 w-9 items-center justify-center rounded-[8px] border transition",
+                          "border-[var(--nav-stroke)] bg-white/[0.06] text-[#d7dee4] hover:border-white/[0.18] hover:bg-white/[0.10] hover:text-white",
+                          tool.disabled && "cursor-not-allowed opacity-45 hover:border-[var(--nav-stroke)] hover:bg-white/[0.06] hover:text-[#d7dee4]"
+                        )}
+                        aria-label={tool.label}
+                        onClick={tool.onClick}
+                        disabled={tool.disabled}
+                      >
+                        <Icon name={tool.icon} size={15} />
+                      </button>
+                    </Tooltip>
+                  ))
+                ) : (
+                  <>
+                    <Tooltip content={sidebarTools[0].label} side="top">
+                      <button
+                        className={cn(
+                          "group flex h-9 w-full min-w-0 items-center justify-center gap-1.5 rounded-[8px] border px-2 transition",
+                          "border-[var(--nav-stroke)] bg-white/[0.06] text-[#d7dee4] hover:border-white/[0.18] hover:bg-white/[0.10] hover:text-white",
+                          sidebarTools[0].disabled && "cursor-not-allowed opacity-45 hover:border-[var(--nav-stroke)] hover:bg-white/[0.06] hover:text-[#d7dee4]"
+                        )}
+                        aria-label={sidebarTools[0].label}
+                        onClick={sidebarTools[0].onClick}
+                        disabled={sidebarTools[0].disabled}
+                      >
+                        <Icon name={sidebarTools[0].icon} size={15} />
+                        <span className="app-sidebar-tools-label truncate text-[12px] font-medium">{sidebarTools[0].expandedLabel}</span>
+                      </button>
+                    </Tooltip>
+                    <div className="grid grid-cols-2 gap-2">
+                      {sidebarTools.slice(1).map((tool) => (
+                        <Tooltip key={tool.shortLabel} content={tool.label} side="top">
+                          <button
+                            className="group flex h-9 min-w-0 items-center justify-center gap-1.5 rounded-[8px] border border-[var(--nav-stroke)] bg-white/[0.06] px-2 text-[#d7dee4] transition hover:border-white/[0.18] hover:bg-white/[0.10] hover:text-white"
+                            aria-label={tool.label}
+                            onClick={tool.onClick}
+                          >
+                            <Icon name={tool.icon} size={15} />
+                            <span className="app-sidebar-tools-label truncate text-[12px] font-medium">{tool.expandedLabel}</span>
+                          </button>
+                        </Tooltip>
+                      ))}
+                    </div>
+                  </>
+                )}
               </div>
             </aside>
 
             <main className="relative z-10 flex min-w-0 flex-1 flex-col overflow-hidden">
-              <div className="flex h-[60px] shrink-0 items-center justify-between border-b border-slate-200 bg-white px-5">
+              <div className="flex h-[64px] shrink-0 items-center justify-between border-b border-[var(--stroke)] bg-white px-6">
                 <div className="flex min-w-0 items-center gap-3">
-                  <div className="flex h-10 w-10 items-center justify-center rounded-[8px] bg-[var(--brand-600)] text-white">
-                    <Icon name={activeMeta.icon} size={18} />
-                  </div>
                   <div className="min-w-0">
                     <div className="flex items-center gap-2">
-                      <div className="truncate text-[15px] font-semibold text-slate-950">{activeMeta.label}</div>
+                      <div className="truncate text-[17px] font-semibold text-[var(--text-strong)]">{activeMeta.label}</div>
                       <Badge tone="default">{activeMeta.section}</Badge>
                     </div>
-                    <div className="mt-0.5 text-[11px] text-slate-500">当前工作区</div>
+                    <div className="mt-0.5 text-[11px] text-[var(--text-muted)]">本地处理 · 可预览 · 可核对</div>
                   </div>
                 </div>
                 <div className="flex items-center gap-2">
+                  <Button variant="ghost" size="sm" onClick={openCurrentResetConfirm} disabled={activeTaskRunning}>
+                    <Icon name="reset" size={14} />
+                    重置当前
+                  </Button>
                   <Button variant="ghost" size="sm" onClick={() => setShowLogs(true)}>
                     <Icon name="logs" size={14} />
                     日志
                   </Button>
-                  <Button variant="secondary" size="sm" onClick={() => setShowResetConfirm(true)}>
-                    <Icon name="reset" size={14} />
-                    重置
-                  </Button>
                 </div>
               </div>
               <TaskStatusBar />
-              <div className="flex-1 overflow-auto bg-[var(--panel)] px-3 py-3" data-main-scroll="true">
+              <div className="flex-1 overflow-auto bg-[var(--panel)] px-5 py-4" data-main-scroll="true">
                 <PageSlot active={activeTab === "stats"} visited={visitedTabs.has("stats")}>
-                  <FileStats key={`stats-${resetKey}`} active={activeTab === "stats"} />
+                  <FileStats key={`stats-${resetVersions.stats}`} active={activeTab === "stats"} />
                 </PageSlot>
                 <PageSlot active={activeTab === "file-organize"} visited={visitedTabs.has("file-organize")}>
-                  <FileOrganize key={`organize-${resetKey}`} active={activeTab === "file-organize"} />
+                  <FileOrganize key={`organize-${resetVersions["file-organize"]}`} active={activeTab === "file-organize"} />
                 </PageSlot>
                 <PageSlot active={activeTab === "batch-rename"} visited={visitedTabs.has("batch-rename")}>
-                  <BatchRename key={`rename-${resetKey}`} active={activeTab === "batch-rename"} />
+                  <BatchRename key={`rename-${resetVersions["batch-rename"]}`} active={activeTab === "batch-rename"} />
                 </PageSlot>
                 <PageSlot active={activeTab === "dedup"} visited={visitedTabs.has("dedup")}>
-                  <Dedup key={`dedup-${resetKey}`} active={activeTab === "dedup"} />
+                  <Dedup key={`dedup-${resetVersions.dedup}`} active={activeTab === "dedup"} />
                 </PageSlot>
                 <PageSlot active={activeTab === "video-cut"} visited={visitedTabs.has("video-cut")}>
-                  <VideoCut key={`video-${resetKey}`} active={activeTab === "video-cut"} />
+                  <VideoCut key={`video-${resetVersions["video-cut"]}`} active={activeTab === "video-cut"} />
                 </PageSlot>
                 <PageSlot active={activeTab === "batch-video-trim"} visited={visitedTabs.has("batch-video-trim")}>
-                  <BatchVideoTrim key={`batch-video-${resetKey}`} active={activeTab === "batch-video-trim"} />
+                  <BatchVideoTrim key={`batch-video-${resetVersions["batch-video-trim"]}`} active={activeTab === "batch-video-trim"} />
                 </PageSlot>
                 <PageSlot active={activeTab === "video-convert"} visited={visitedTabs.has("video-convert")}>
-                  <VideoConvert key={`convert-${resetKey}`} active={activeTab === "video-convert"} />
-                </PageSlot>
-                <PageSlot active={activeTab === "text-to-image"} visited={visitedTabs.has("text-to-image")}>
-                  <TextToImage key={`text-to-image-${resetKey}`} active={activeTab === "text-to-image"} />
+                  <VideoConvert key={`convert-${resetVersions["video-convert"]}`} active={activeTab === "video-convert"} />
                 </PageSlot>
                 <PageSlot active={activeTab === "watermark"} visited={visitedTabs.has("watermark")}>
-                  <Watermark key={`watermark-${resetKey}`} active={activeTab === "watermark"} />
+                  <Watermark key={`watermark-${resetVersions.watermark}`} active={activeTab === "watermark"} />
                 </PageSlot>
               </div>
             </main>
           </div>
 
           <Modal
-            open={showResetConfirm}
-            onClose={() => setShowResetConfirm(false)}
-            accessibleTitle="重置当前工作区"
+            open={resetMode !== null}
+            onClose={() => setResetMode(null)}
+            accessibleTitle={resetMode === "all" ? "重置全部模块" : `重置${activeMeta.label}`}
             className="max-w-md"
           >
             <div className="space-y-5 p-6">
               <div>
-                <CardTitle className="text-xl">重置当前工作区？</CardTitle>
+                <CardTitle className="text-xl">{resetTitle}</CardTitle>
+                <div className="mt-2 text-sm leading-6 text-[var(--text-muted)]">{resetDescription}</div>
               </div>
               <div className="flex justify-end gap-3">
-                <Button variant="secondary" onClick={() => setShowResetConfirm(false)}>
+                <Button variant="secondary" onClick={() => setResetMode(null)}>
                   取消
                 </Button>
-                <Button variant="primary" onClick={handleReset}>
+                <Button variant="primary" onClick={handleReset} disabled={resetBlocked}>
                   确认重置
                 </Button>
               </div>
@@ -346,8 +461,17 @@ function App() {
             </div>
           </Modal>
 
-          {showLogs && <LogViewer onClose={() => setShowLogs(false)} />}
-        </div>
+      {showLogs && <LogViewer onClose={() => setShowLogs(false)} />}
+    </div>
+  );
+}
+
+function App() {
+  return (
+    <ToastProvider>
+      <TooltipProvider delayDuration={300}>
+        <TaskCenterProvider>
+          <AppShell />
         </TaskCenterProvider>
       </TooltipProvider>
     </ToastProvider>

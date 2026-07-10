@@ -445,7 +445,7 @@ export default function BatchVideoTrim({ active = true }: { active?: boolean }) 
   }
 
   return (
-    <div className="space-y-6 p-6">
+    <div className="mx-auto max-w-[1360px] space-y-4">
       <BatchVideoDropCard
         dragging={dragging}
         onSelectFiles={() => void selectFiles()}

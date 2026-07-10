@@ -17,10 +17,10 @@ export function Modal({ open = true, onClose, accessibleTitle, className, childr
       }}
     >
       <DialogPrimitive.Portal>
-        <DialogPrimitive.Overlay className="fixed inset-0 z-50 bg-slate-950/42 backdrop-blur-sm data-[state=closed]:animate-none" />
+        <DialogPrimitive.Overlay className="fixed inset-0 z-50 bg-[#101417]/42 backdrop-blur-sm data-[state=closed]:animate-none" />
         <DialogPrimitive.Content
           className={cn(
-            "fixed left-1/2 top-1/2 z-50 w-[calc(100vw-32px)] max-w-3xl -translate-x-1/2 -translate-y-1/2 rounded-[12px] border border-slate-200 bg-white shadow-[0_18px_48px_rgba(15,23,42,0.16)] outline-none",
+            "fixed left-1/2 top-1/2 z-50 w-[calc(100vw-32px)] max-w-3xl -translate-x-1/2 -translate-y-1/2 rounded-[8px] border border-[var(--stroke)] bg-white shadow-[0_18px_48px_rgba(16,20,23,0.16)] outline-none",
             "focus-visible:ring-2 focus-visible:ring-[var(--brand-300)] focus-visible:ring-offset-2 focus-visible:ring-offset-white",
             className
           )}

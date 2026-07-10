@@ -11,6 +11,7 @@ import { formatTime, getFrameNumber, snapTimeToFrame } from "./utils";
 
 type TimelineDragMode = "playhead" | "start" | "end";
 type PreviewStrategy = "video" | "image";
+type TimelineToolTone = "default" | "active";
 
 interface VideoCutPreviewTimelineProps {
   videoPath: string;
@@ -238,17 +239,15 @@ export function VideoCutPreviewTimeline({
                   <Badge tone={controlUnavailableBadge.tone}>{controlUnavailableBadge.label}</Badge>
                 )}
                 <div className="flex flex-wrap items-center gap-2">
-                  <Button
-                    variant={clipPlaybackActive ? "primary" : "ghost"}
-                    size="sm"
-                    className="h-7 px-2.5 text-[11px]"
+                  <TimelineToolButton
+                    tone={clipPlaybackActive ? "active" : "default"}
                     onClick={onToggleClipPlayback}
                     disabled={processing || previewStrategy !== "video" || !previewReady || clipDuration <= 0}
                     aria-pressed={clipPlaybackActive}
                     title={playClipButtonTitle}
                   >
                     {playClipButtonLabel}
-                  </Button>
+                  </TimelineToolButton>
                   <div className="flex items-center gap-2 rounded-full border border-white/10 bg-slate-900/50 px-2.5 py-1">
                     <span className="text-[11px] text-slate-300">{loopClipButtonLabel}</span>
                     <Switch
@@ -259,40 +258,40 @@ export function VideoCutPreviewTimeline({
                       className="h-5 w-9"
                     />
                   </div>
-                  <Button variant="ghost" size="sm" className="h-7 px-2.5 text-[11px]" onClick={() => onStepPreviewFrame(-1)} disabled={processing} title="左方向键">
+                  <TimelineToolButton onClick={() => onStepPreviewFrame(-1)} disabled={processing} title="左方向键">
                     上一帧
-                  </Button>
-                  <Button variant="ghost" size="sm" className="h-7 px-2.5 text-[11px]" onClick={() => onStepPreviewFrame(1)} disabled={processing} title="右方向键">
+                  </TimelineToolButton>
+                  <TimelineToolButton onClick={() => onStepPreviewFrame(1)} disabled={processing} title="右方向键">
                     下一帧
-                  </Button>
-                  <Button variant="ghost" size="sm" className="h-7 px-2.5 text-[11px]" onClick={onApplyCurrentFrameToStart} disabled={processing} title="[ / I">
+                  </TimelineToolButton>
+                  <TimelineToolButton onClick={onApplyCurrentFrameToStart} disabled={processing} title="[ / I">
                     设起点
-                  </Button>
-                  <Button variant="ghost" size="sm" className="h-7 px-2.5 text-[11px]" onClick={onApplyCurrentFrameToEnd} disabled={processing} title="] / O">
+                  </TimelineToolButton>
+                  <TimelineToolButton onClick={onApplyCurrentFrameToEnd} disabled={processing} title="] / O">
                     设终点
-                  </Button>
+                  </TimelineToolButton>
                 </div>
               </div>
               {showAdvancedControls && (
                 <div className="mb-2 flex flex-wrap items-center gap-2">
-                  <Button variant="ghost" size="sm" className="h-7 px-2.5 text-[11px]" onClick={() => onPreviewTimeChange(startTime)} disabled={processing} title="Home">
+                  <TimelineToolButton onClick={() => onPreviewTimeChange(startTime)} disabled={processing} title="Home">
                     看起点
-                  </Button>
-                  <Button variant="ghost" size="sm" className="h-7 px-2.5 text-[11px]" onClick={onSnapPreviewIntoClip} disabled={processing || currentPreviewInClip} title={snapPreviewButtonTitle}>
+                  </TimelineToolButton>
+                  <TimelineToolButton onClick={onSnapPreviewIntoClip} disabled={processing || currentPreviewInClip} title={snapPreviewButtonTitle}>
                     {snapPreviewButtonLabel}
-                  </Button>
-                  <Button variant="ghost" size="sm" className="h-7 px-2.5 text-[11px]" onClick={onPreviewClipMiddle} disabled={processing} title="M">
+                  </TimelineToolButton>
+                  <TimelineToolButton onClick={onPreviewClipMiddle} disabled={processing} title="M">
                     看中点
-                  </Button>
-                  <Button variant="ghost" size="sm" className="h-7 px-2.5 text-[11px]" onClick={() => onPreviewTimeChange(endTime)} disabled={processing} title="End">
+                  </TimelineToolButton>
+                  <TimelineToolButton onClick={() => onPreviewTimeChange(endTime)} disabled={processing} title="End">
                     看终点
-                  </Button>
-                  <Button variant="ghost" size="sm" className="h-7 px-2.5 text-[11px]" onClick={() => onShiftClipRange(-1)} disabled={processing} title=",">
+                  </TimelineToolButton>
+                  <TimelineToolButton onClick={() => onShiftClipRange(-1)} disabled={processing} title=",">
                     左移片段
-                  </Button>
-                  <Button variant="ghost" size="sm" className="h-7 px-2.5 text-[11px]" onClick={() => onShiftClipRange(1)} disabled={processing} title=".">
+                  </TimelineToolButton>
+                  <TimelineToolButton onClick={() => onShiftClipRange(1)} disabled={processing} title=".">
                     右移片段
-                  </Button>
+                  </TimelineToolButton>
                 </div>
               )}
               {timelineFrames.length > 0 ? (
@@ -445,5 +444,28 @@ export function VideoCutPreviewTimeline({
         </div>
       </CardContent>
     </Card>
+  );
+}
+
+function TimelineToolButton({
+  tone = "default",
+  className,
+  children,
+  ...props
+}: React.ButtonHTMLAttributes<HTMLButtonElement> & { tone?: TimelineToolTone }) {
+  return (
+    <button
+      className={cn(
+        "inline-flex h-7 items-center justify-center gap-1.5 rounded-[7px] px-2.5 text-[11px] font-medium transition",
+        tone === "active"
+          ? "bg-[var(--brand-500)] text-white hover:bg-[var(--brand-600)]"
+          : "border border-white/10 bg-white/[0.06] text-slate-200 hover:border-white/20 hover:bg-white/[0.12] hover:text-white",
+        "disabled:pointer-events-none disabled:opacity-45",
+        className
+      )}
+      {...props}
+    >
+      {children}
+    </button>
   );
 }

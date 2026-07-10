@@ -29,6 +29,7 @@ export interface TauriEventMap {
 
 type TauriWindowInternals = Window & {
   __TAURI_INTERNALS__?: {
+    transformCallback?: <T>(callback: EventCallback<T>) => number;
     unregisterCallback: (id: number) => void;
   };
 };
@@ -44,6 +45,10 @@ export function safeListen<T>(event: EventName, handler: EventCallback<T>, optio
     ? { kind: "AnyLabel" as const, label: options.target }
     : (options?.target ?? { kind: "Any" as const });
   const tauriWindow = window as TauriWindowInternals;
+  if (!tauriWindow.__TAURI_INTERNALS__?.transformCallback) {
+    return () => {};
+  }
+
   let disposed = false;
   let eventId: number | null = null;
   const handlerId = transformCallback(handler);

@@ -11,22 +11,22 @@ interface ButtonProps extends ButtonHTMLAttributes<HTMLButtonElement> {
 
 const variantClasses: Record<ButtonVariant, string> = {
   primary:
-    "bg-[var(--brand-600)] text-white hover:bg-[var(--brand-500)] active:bg-[var(--brand-700)]",
+    "bg-[var(--brand-500)] text-white shadow-[0_8px_18px_rgba(47,125,189,0.18)] hover:bg-[var(--brand-600)] active:bg-[var(--brand-700)]",
   secondary:
-    "bg-white text-slate-900 ring-1 ring-slate-300 hover:bg-slate-50 hover:ring-slate-400 active:bg-slate-100",
+    "bg-white text-[var(--text-strong)] ring-1 ring-[var(--stroke-strong)] hover:bg-[#f8faf8] hover:ring-[rgba(47,125,189,0.34)] active:bg-[#eef3f5]",
   ghost:
-    "bg-transparent text-slate-600 hover:bg-slate-100 hover:text-slate-950 active:bg-slate-200/70",
+    "bg-transparent text-[var(--text-muted)] hover:bg-[#eef3f5] hover:text-[var(--text-strong)] active:bg-[#e4ebee]",
   danger:
-    "bg-[var(--danger-600)] text-white hover:bg-[var(--danger-500)] active:bg-rose-700",
+    "bg-[var(--danger-600)] text-white shadow-[0_8px_18px_rgba(187,62,58,0.16)] hover:bg-[var(--danger-500)] active:bg-[#9f302d]",
   subtle:
-    "bg-slate-100 text-slate-700 ring-1 ring-slate-200 hover:bg-white hover:text-slate-950 active:bg-slate-100",
+    "bg-[#eef3f5] text-[var(--text-muted)] ring-1 ring-transparent hover:bg-white hover:text-[var(--text-strong)] hover:ring-[var(--stroke)] active:bg-[#e4ebee]",
 };
 
 const sizeClasses: Record<ButtonSize, string> = {
   sm: "h-8 px-3 text-xs",
   md: "h-10 px-4 text-sm",
   lg: "h-11 px-5 text-sm",
-  icon: "h-10 w-10",
+  icon: "h-9 w-9",
 };
 
 export function Button({
@@ -39,9 +39,9 @@ export function Button({
   return (
     <button
       className={cn(
-        "inline-flex items-center justify-center gap-2 rounded-[8px] font-medium transition-all duration-200 outline-none",
+        "inline-flex items-center justify-center gap-2 whitespace-nowrap rounded-[8px] font-medium transition-all duration-200 outline-none",
         "disabled:pointer-events-none disabled:cursor-not-allowed disabled:opacity-45 disabled:saturate-50 disabled:shadow-none disabled:ring-0",
-        "focus-visible:ring-2 focus-visible:ring-[var(--brand-300)] focus-visible:ring-offset-2 focus-visible:ring-offset-white",
+        "focus-visible:ring-2 focus-visible:ring-[var(--brand-300)] focus-visible:ring-offset-2 focus-visible:ring-offset-[var(--panel)]",
         "active:translate-y-px",
         variantClasses[variant],
         sizeClasses[size],

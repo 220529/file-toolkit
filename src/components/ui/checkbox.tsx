@@ -7,7 +7,7 @@ export function Checkbox({ className, ...props }: ComponentPropsWithoutRef<typeo
   return (
     <CheckboxPrimitive.Root
       className={cn(
-        "flex h-4 w-4 shrink-0 items-center justify-center rounded-[5px] border border-slate-300 bg-white text-white outline-none transition",
+        "flex h-4 w-4 shrink-0 items-center justify-center rounded-[5px] border border-[var(--stroke-strong)] bg-white text-white outline-none transition",
         "data-[state=checked]:border-[var(--brand-600)] data-[state=checked]:bg-[var(--brand-600)]",
         "focus-visible:ring-2 focus-visible:ring-[var(--brand-300)] focus-visible:ring-offset-2 focus-visible:ring-offset-white",
         "disabled:cursor-not-allowed disabled:opacity-50",
