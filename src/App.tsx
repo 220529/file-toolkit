@@ -10,6 +10,7 @@ import { TaskCenterProvider, TaskStatusBar, useTaskCenter } from "./components/T
 import { ToastProvider } from "./components/Toast";
 import LogViewer from "./components/LogViewer";
 import { cn } from "./utils/cn";
+import appIcon from "../icon.png";
 import "./index.css";
 
 const FileStats = lazy(() => import("./pages/FileStats"));
@@ -219,8 +220,8 @@ function AppShell() {
                   collapsed && "flex-col justify-center"
                 )}
               >
-                <div className="flex h-9 w-9 items-center justify-center rounded-[7px] bg-white text-[var(--brand-700)]">
-                  <Icon name="app" size={18} />
+                <div className="h-9 w-9 shrink-0 overflow-hidden rounded-[7px]">
+                  <img src={appIcon} alt="" className="h-full w-full" />
                 </div>
                 {!collapsed && (
                   <div className="app-sidebar-brand-text min-w-0 flex-1">

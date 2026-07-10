@@ -1,0 +1,31 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024" fill="none">
+  <title>File Toolkit cat app icon</title>
+  <rect x="48" y="48" width="928" height="928" rx="220" fill="#001529"/>
+  <rect x="72" y="72" width="880" height="880" rx="196" stroke="#163A5C" stroke-width="20"/>
+
+  <path d="M250 350C250 312.445 280.445 282 318 282H602L714 394V670C714 707.555 683.555 738 646 738H318C280.445 738 250 707.555 250 670V350Z" fill="#0958D9"/>
+  <path d="M292 310C292 272.445 322.445 242 360 242H620L744 366V650C744 687.555 713.555 718 676 718H360C322.445 718 292 687.555 292 650V310Z" fill="#69B1FF"/>
+
+  <path d="M310 558V370L372 228L462 300C493 287 531 287 562 300L652 228L714 370V558C714 663.486 623.567 730 512 730C400.433 730 310 663.486 310 558Z" fill="#F8FBFF"/>
+  <path d="M374 278L402 344L454 308L374 278Z" fill="#BAE0FF"/>
+  <path d="M650 278L622 344L570 308L650 278Z" fill="#BAE0FF"/>
+
+  <ellipse cx="424" cy="468" rx="28" ry="34" fill="#001529"/>
+  <ellipse cx="600" cy="468" rx="28" ry="34" fill="#001529"/>
+  <circle cx="434" cy="456" r="8" fill="#FFFFFF"/>
+  <circle cx="610" cy="456" r="8" fill="#FFFFFF"/>
+  <path d="M493 526C493 515.507 501.507 507 512 507C522.493 507 531 515.507 531 526L512 543L493 526Z" fill="#1677FF"/>
+  <path d="M512 543V557M512 557C493 557 486 570 486 580M512 557C531 557 538 570 538 580" stroke="#001529" stroke-width="14" stroke-linecap="round"/>
+
+  <path d="M372 526L278 502M370 562L264 562M380 596L288 622" stroke="#001529" stroke-width="14" stroke-linecap="round"/>
+  <path d="M652 526L746 502M654 562L760 562M644 596L736 622" stroke="#001529" stroke-width="14" stroke-linecap="round"/>
+
+  <path d="M208 620C208 588.52 233.52 563 265 563H759C790.48 563 816 588.52 816 620V730C816 775.287 779.287 812 734 812H290C244.713 812 208 775.287 208 730V620Z" fill="#1677FF"/>
+  <path d="M208 620C208 588.52 233.52 563 265 563H759C790.48 563 816 588.52 816 620V654H208V620Z" fill="#4096FF"/>
+  <path d="M370 563H654L626 631C620.455 644.466 607.329 653.255 592.764 653.255H431.236C416.671 653.255 403.545 644.466 398 631L370 563Z" fill="#E6F4FF"/>
+  <rect x="370" y="590" width="104" height="92" rx="46" fill="#F8FBFF"/>
+  <rect x="550" y="590" width="104" height="92" rx="46" fill="#F8FBFF"/>
+
+  <circle cx="738" cy="746" r="112" fill="#52C41A" stroke="#001529" stroke-width="28"/>
+  <path d="M686 746L722 782L794 710" stroke="#FFFFFF" stroke-width="34" stroke-linecap="round" stroke-linejoin="round"/>
+</svg>
